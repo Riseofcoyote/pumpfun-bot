@@ -343,21 +343,56 @@ class UniversalTrader:
         # Gate mode watches several coins at once but holds one position at a
         # time: the lock covers buy -> exit -> cleanup.
         self._trade_lock = asyncio.Lock()
+        self._ledger_n = 0
+        self._ledger_wins = 0
+        self._ledger_net = 0.0
         self._watch_tasks: set[asyncio.Task] = set()
+
+    async def _wallet_sol(self) -> float | None:
+        """The trading wallet's SOL balance, or None if the read failed."""
+        try:
+            resp = await self.solana_client.post_rpc(
+                {"jsonrpc": "2.0", "id": 1, "method": "getBalance",
+                 "params": [str(self.wallet.pubkey), {"commitment": "confirmed"}]},
+                deadline_seconds=10,
+            )
+        except Exception:
+            return None
+        if resp and "result" in resp:
+            return resp["result"]["value"] / 1_000_000_000
+        return None
 
     async def _log_wallet(self) -> None:
         """Log the trading wallet's public address and SOL balance (never the key)."""
-        resp = await self.solana_client.post_rpc(
-            {"jsonrpc": "2.0", "id": 1, "method": "getBalance",
-             "params": [str(self.wallet.pubkey), {"commitment": "confirmed"}]},
-            deadline_seconds=10,
-        )
-        balance = (
-            f"{resp['result']['value'] / 1_000_000_000:.4f} SOL"
-            if resp and "result" in resp
-            else "unknown (balance read failed)"
-        )
+        sol = await self._wallet_sol()
+        balance = f"{sol:.4f} SOL" if sol is not None else "unknown (balance read failed)"
         logger.info(f"Trading wallet: {self.wallet.pubkey} | balance {balance}")
+
+    def _record_ledger(self, token_info: TokenInfo, outcome: str, net_sol: float) -> None:
+        """Append one real trade's true result (wallet SOL before vs after, so every
+        fee, slippage and reclaimed rent is counted) and log the running total."""
+        self._ledger_n += 1
+        self._ledger_net += net_sol
+        if net_sol > 0:
+            self._ledger_wins += 1
+        logger.info(
+            f"[ledger] {token_info.symbol}: {outcome}, net {net_sol:+.5f} SOL | "
+            f"session: {self._ledger_n} trades, {self._ledger_wins} up, "
+            f"total {self._ledger_net:+.5f} SOL"
+        )
+        try:
+            path = Path("trades") / "ledger.csv"
+            path.parent.mkdir(exist_ok=True)
+            new_file = not path.exists()
+            with path.open("a", encoding="utf-8") as f:
+                if new_file:
+                    f.write("time_utc,symbol,mint,outcome,net_sol\n")
+                f.write(
+                    f"{datetime.utcnow().isoformat()},{token_info.symbol.replace(',', ' ')},"
+                    f"{token_info.mint},{outcome},{net_sol:.6f}\n"
+                )
+        except OSError:
+            logger.exception("Failed to write trades/ledger.csv")
 
     async def _resolve_quote_token_programs(self) -> None:
         """Warm the quote-mint token-program and decimals caches at startup.
@@ -790,12 +825,18 @@ class UniversalTrader:
             f"{token_quote_mint} worth of {token_info.symbol} "
             f"on {token_info.platform.value}..."
         )
+        sol_before = await self._wallet_sol()
         buy_result: TradeResult = await self.buyer.execute(token_info)
 
         if buy_result.success:
             await self._handle_successful_buy(token_info, buy_result)
         else:
             await self._handle_failed_buy(token_info, buy_result)
+
+        sol_after = await self._wallet_sol()
+        if sol_before is not None and sol_after is not None:
+            outcome = "traded" if buy_result.success else "buy failed"
+            self._record_ledger(token_info, outcome, sol_after - sol_before)
 
         # Only wait for next token in yolo mode
         if self.yolo_mode:
