@@ -13,4 +13,4 @@ primary_region = "ewr"
   memory = "512mb"
 
 [processes]
-  app = "uv run --no-sync pump_bot"
+  app = "sh -c 'mkdir -p /data/trades /data/logs && exec uv run --no-sync pump_bot'"

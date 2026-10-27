@@ -7,4 +7,4 @@ RUN uv sync --frozen --no-dev && uv pip install -e .
 RUN mkdir -p /data/trades /data/logs && ln -s /data/trades trades && ln -s /data/logs logs
 ENV PYTHONUNBUFFERED=1
 # Secrets come from Fly: SOLANA_NODE_RPC_ENDPOINT, SOLANA_NODE_WSS_ENDPOINT, SOLANA_PRIVATE_KEY
-CMD ["uv", "run", "--no-sync", "pump_bot"]
+CMD ["sh", "-c", "mkdir -p /data/trades /data/logs && exec uv run --no-sync pump_bot"]
