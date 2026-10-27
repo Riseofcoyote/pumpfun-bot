@@ -201,6 +201,30 @@ r = asyncio.run(qg.QualityGate(fast, FakeClient(holders, [0.02]), None)
                 .evaluate_stream(token(creator=Pubkey.from_string(DEV)), stream))
 check(r is not None and "dev sold" in r, "stream: dev selling in the window skipped")
 
+# RPC watch seeded from a PumpPortal create: start values free, 2 curve reads
+class CountingClient(FakeClient):
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self.methods = []
+
+    async def post_rpc(self, body, **kw):
+        self.methods.append(body["method"])
+        return await super().post_rpc(body, **kw)
+
+
+c = CountingClient(holders, [0.02])
+curve = FakeCurve([3.0, 6.0])
+r = asyncio.run(qg.QualityGate(fast, c, curve).evaluate(
+    token(creator=Pubkey.new_unique()), CURVE, launch=launch))
+check(r is None and curve.calls == 2, "seeded RPC watch: healthy coin passes with 2 curve reads")
+
+c = CountingClient(holders, [0.02])
+curve = FakeCurve([0.4, 0.6])
+r = asyncio.run(qg.QualityGate(fast, c, curve).evaluate(
+    token(creator=Pubkey.new_unique()), CURVE, launch=launch))
+check(r is not None and "raised" in r and c.methods == [],
+      "seeded RPC watch: thin coin skipped without dev/holder lookups")
+
 # paper trade: price rises 60% -> take profit, net of 3% costs
 prices = iter([1.0, 1.2, 1.6])
 

@@ -1,5 +1,7 @@
 """Factory for creating platform-aware token listeners."""
 
+import os
+
 from interfaces.core import Platform
 from monitoring.base_listener import BaseTokenListener
 from utils.logger import get_logger
@@ -89,7 +91,9 @@ class ListenerFactory:
             # without spending the RPC plan on logsSubscribe.
             from monitoring.pumpportal_listener import PumpPortalListener
 
-            listener = PumpPortalListener()
+            listener = PumpPortalListener(
+                api_key=(os.getenv("PUMPPORTAL_API_KEY") or "").strip() or None
+            )
             logger.info("Created PumpPortal listener for token monitoring")
             return listener
 

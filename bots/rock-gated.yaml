@@ -39,7 +39,7 @@ compute_units: {}
 filters:
   match_string: null
   bro_address: null
-  listener_type: "logs"     # logsSubscribe works on Chainstack
+  listener_type: "pumpportal"  # free new-coin feed; keeps RPC use low (logs burned the plan)
   max_token_age: 3          # only start watching coins seen within 3 seconds
   marry_mode: false
   yolo_mode: true           # keep going coin after coin (one at a time)
@@ -48,10 +48,11 @@ quality_gate:
   enabled: true
   dry_run: false            # LIVE: trades real SOL. Set true for paper mode.
   observe_seconds: 30       # watch window before deciding
-  max_concurrent_watches: 5 # coins watched at once (still only one position at a time)
+  max_concurrent_watches: 3 # coins watched at once (one position at a time); ~2 RPC calls per coin
   min_sol_raised: 4.0       # real SOL bought into the curve by end of window
   max_sol_raised: 45.0      # skip if it already ran (graduation is ~85 SOL)
   min_sol_growth_second_half: 0.5   # still being bought, not peaked
+  min_unique_buyers: 8      # only with a PumpPortal API key (trade stream)
   max_top_holder_pct: 0.08  # no single wallet (besides the curve) over 8%
   max_top10_holders_pct: 0.30
   require_holder_check: false      # holder checks need a Chainstack Dedicated Node; off = trade without them

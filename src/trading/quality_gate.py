@@ -17,7 +17,7 @@ gathers the numbers.
 
 import asyncio
 import csv
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from time import monotonic
@@ -242,21 +242,39 @@ class QualityGate:
         amount = value["data"]["parsed"]["info"]["tokenAmount"]["amount"]
         return int(amount) / PUMP_TOTAL_SUPPLY
 
-    async def evaluate(self, token_info: TokenInfo, pool: Pubkey) -> str | None:
-        """Watch the coin for ``observe_seconds``; reason to skip, or None to buy."""
+    async def evaluate(
+        self, token_info: TokenInfo, pool: Pubkey, launch: Any | None = None
+    ) -> str | None:
+        """Watch the coin for ``observe_seconds`` via RPC; reason to skip, or None to buy.
+
+        ``launch`` (a PumpPortal create: v_sol, initial_buy_tokens) supplies the
+        starting SOL and dev holding for free. A coin that fails on SOL raised
+        costs two curve reads; the dev and holder reads happen only after that.
+        """
         self.stats["seen"] += 1
         reason = self.quick_reject(token_info)
         if reason:
             return reason
         try:
-            sol_start, _ = await self._sol_raised(pool)
-            dev_start = await self._dev_pct(token_info)
+            if launch is not None:
+                sol_start = max(0.0, launch.v_sol - INITIAL_VIRTUAL_SOL)
+                dev_start = launch.initial_buy_tokens / (PUMP_TOTAL_SUPPLY / 10**6)
+            else:
+                sol_start, _ = await self._sol_raised(pool)
+                dev_start = await self._dev_pct(token_info)
             await asyncio.sleep(self.cfg.observe_seconds / 2)
             sol_mid, done = await self._sol_raised(pool)
             if done:
                 return "curve completed during window"
             await asyncio.sleep(self.cfg.observe_seconds / 2)
             sol_end, done = await self._sol_raised(pool)
+            early = Snapshot(sol_start, sol_mid, sol_end, done, None, None, dev_start, dev_start)
+            reason = judge_snapshot(early, replace(self.cfg, require_holder_check=False))
+            if reason:
+                logger.info(
+                    f"[gate] {token_info.symbol}: SOL {sol_start:.2f}->{sol_mid:.2f}->{sol_end:.2f}"
+                )
+                return reason
             top, top10 = await self._holders(token_info)
             dev_end = await self._dev_pct(token_info)
         except Exception as e:  # noqa: BLE001 - any read failure means "don't buy"

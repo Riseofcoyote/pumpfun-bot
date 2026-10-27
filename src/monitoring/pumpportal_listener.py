@@ -69,9 +69,13 @@ class TradeWatch:
 class PumpPortalListener(BaseTokenListener):
     """New pump.fun coins and per-coin trades from PumpPortal (free, no key)."""
 
-    def __init__(self, url: str = PUMPPORTAL_WSS):
+    def __init__(self, url: str = PUMPPORTAL_WSS, api_key: str | None = None):
+        """``api_key``: a PumpPortal key whose wallet holds >= 0.02 SOL. Without
+        one, new-coin events still flow but per-coin trades are refused, and
+        ``trades_available`` is False so the gate watches via RPC instead."""
         super().__init__(Platform.PUMP_FUN)
-        self.url = url
+        self.url = f"{url}?api-key={api_key}" if api_key else url
+        self.trades_available = bool(api_key)
         self.address_provider = PumpFunAddressProvider()
         self.launches: OrderedDict[str, Launch] = OrderedDict()
         self._watches: dict[str, TradeWatch] = {}
@@ -184,6 +188,16 @@ class PumpPortalListener(BaseTokenListener):
             return
         tx_type = msg.get("txType")
         mint = msg.get("mint")
+        if tx_type is None and "only available when connecting with an API key" in str(
+            msg.get("message", "")
+        ):
+            if self.trades_available:
+                logger.warning(
+                    "[pumpportal] trade stream refused (needs a funded API key); "
+                    "the gate will watch coins via RPC"
+                )
+            self.trades_available = False
+            return
         if tx_type in ("buy", "sell") and mint in self._watches:
             self._watches[mint].events.append(msg)
             return
