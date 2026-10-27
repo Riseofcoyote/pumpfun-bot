@@ -341,6 +341,20 @@ class UniversalTrader:
                 gate_cfg, self.solana_client, self.platform_implementations.curve_manager
             )
 
+    async def _log_wallet(self) -> None:
+        """Log the trading wallet's public address and SOL balance (never the key)."""
+        resp = await self.solana_client.post_rpc(
+            {"jsonrpc": "2.0", "id": 1, "method": "getBalance",
+             "params": [str(self.wallet.pubkey), {"commitment": "confirmed"}]},
+            deadline_seconds=10,
+        )
+        balance = (
+            f"{resp['result']['value'] / 1_000_000_000:.4f} SOL"
+            if resp and "result" in resp
+            else "unknown (balance read failed)"
+        )
+        logger.info(f"Trading wallet: {self.wallet.pubkey} | balance {balance}")
+
     async def _resolve_quote_token_programs(self) -> None:
         """Warm the quote-mint token-program and decimals caches at startup.
 
@@ -369,6 +383,7 @@ class UniversalTrader:
     async def start(self) -> None:
         """Start the trading bot and listen for new tokens."""
         logger.info(f"Starting Universal Trader for {self.platform.value}")
+        await self._log_wallet()
         logger.info(
             f"Match filter: {self.match_string if self.match_string else 'None'}"
         )
