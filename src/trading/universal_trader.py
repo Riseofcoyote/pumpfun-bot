@@ -713,7 +713,24 @@ class UniversalTrader:
                 ):
                     logger.warning("Wallet at floor - not buying. Stop the bot or top up.")
                     return
-                reason = await gate.evaluate(token_info, self._get_pool_address(token_info))
+                if hasattr(self.token_listener, "watch"):
+                    # Trade-stream listener (PumpPortal): watch without RPC,
+                    # then read the coin's real accounts once before trading.
+                    reason = await gate.evaluate_stream(token_info, self.token_listener)
+                    if reason is None:
+                        impl = self.platform_implementations
+                        reason = await self.buyer._refresh_curve_state(
+                            token_info, impl.address_provider, impl.curve_manager
+                        )
+                    if reason is None:
+                        reason = gate.quick_reject(token_info)  # mayhem/quote now known
+                    token_quote_mint = normalize_quote_mint(token_info.quote_mint)
+                    if reason is None and token_quote_mint not in self.quote_amounts:
+                        reason = f"no buy amount configured for quote mint {token_quote_mint}"
+                else:
+                    reason = await gate.evaluate(
+                        token_info, self._get_pool_address(token_info)
+                    )
                 if reason:
                     logger.info(f"[gate] skip {token_info.symbol}: {reason}")
                     return

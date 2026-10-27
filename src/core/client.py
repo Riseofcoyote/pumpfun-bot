@@ -193,7 +193,7 @@ class SolanaClient:
         self._session: aiohttp.ClientSession | None = None
         self._session_lock = asyncio.Lock()
 
-    async def start_blockhash_updater(self, interval: float = 5.0):
+    async def start_blockhash_updater(self, interval: float = 20.0):
         """Start background task to update recent blockhash."""
         while True:
             try:

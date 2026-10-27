@@ -140,6 +140,67 @@ check(asyncio.run(qg.QualityGate(fast, FakeClient(holders, [0], balance=0.01), N
 check(not asyncio.run(qg.QualityGate(fast, FakeClient(holders, [0], balance=1), None)
                       .wallet_below_floor(DEV)), "wallet above floor keeps buying")
 
+# stream path (PumpPortal): SOL raised, distinct buyers and dev sells come from trades
+from dataclasses import dataclass as _dc  # noqa: E402
+
+
+@_dc
+class _Launch:
+    creator: str
+    initial_buy_tokens: float
+    v_sol: float
+
+
+class FakeWatch:
+    def __init__(self, events):
+        self.events, self._all = [], list(events)
+
+    @property
+    def last_v_sol(self):
+        return self.events[-1]["vSolInBondingCurve"] if self.events else None
+
+
+class FakeStream:
+    """Releases the first half of the trades at watch(), the rest at the midpoint read."""
+
+    def __init__(self, launch, first, second):
+        self.launches = {str(MINT): launch}
+        self.first, self.second, self.unwatched = first, second, False
+
+    async def watch(self, mint):
+        self.w = FakeWatch([])
+        self.w.events.extend(self.first)
+        asyncio.get_running_loop().call_later(0.007, self.w.events.extend, self.second)
+        return self.w
+
+    async def unwatch(self, mint):
+        self.unwatched = True
+
+
+DEV = str(Pubkey.new_unique())
+
+
+def buys(n, v0, step):
+    return [{"txType": "buy", "traderPublicKey": f"b{i}", "vSolInBondingCurve": v0 + step * (i + 1)}
+            for i in range(n)]
+
+launch = _Launch(DEV, 20_000_000, 30.5)  # dev bought 2% at launch
+stream = FakeStream(launch, buys(6, 30.5, 0.5), buys(8, 33.5, 0.4))
+gate = qg.QualityGate(fast, FakeClient(holders, [0.02]), None)
+r = asyncio.run(gate.evaluate_stream(token(creator=Pubkey.from_string(DEV)), stream))
+check(r is None and stream.unwatched, "stream: healthy coin passes and trades are unsubscribed")
+
+stream = FakeStream(launch, buys(3, 30.5, 1.5), buys(2, 35.0, 0.5))
+r = asyncio.run(qg.QualityGate(fast, FakeClient(holders, [0.02]), None)
+                .evaluate_stream(token(creator=Pubkey.from_string(DEV)), stream))
+check(r is not None and "distinct buyers" in r, "stream: too few distinct buyers skipped")
+
+dev_sell = [{"txType": "sell", "traderPublicKey": DEV, "newTokenBalance": 0, "vSolInBondingCurve": 36.0}]
+stream = FakeStream(launch, buys(6, 30.5, 0.5), buys(8, 33.5, 0.4) + dev_sell)
+r = asyncio.run(qg.QualityGate(fast, FakeClient(holders, [0.02]), None)
+                .evaluate_stream(token(creator=Pubkey.from_string(DEV)), stream))
+check(r is not None and "dev sold" in r, "stream: dev selling in the window skipped")
+
 # paper trade: price rises 60% -> take profit, net of 3% costs
 prices = iter([1.0, 1.2, 1.6])
 

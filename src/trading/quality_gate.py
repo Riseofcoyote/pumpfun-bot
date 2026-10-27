@@ -35,6 +35,9 @@ logger = get_logger(__name__)
 
 LAMPORTS = 1_000_000_000
 PUMP_TOTAL_SUPPLY = 1_000_000_000 * 10**6  # pump.fun: 1B tokens, 6 decimals
+# pump.fun curves start with 30 SOL of virtual reserves; real SOL raised is
+# vSolInBondingCurve minus this.
+INITIAL_VIRTUAL_SOL = 30.0
 
 
 @dataclass
@@ -48,6 +51,7 @@ class GateConfig:
     min_sol_raised: float = 4.0
     max_sol_raised: float = 45.0
     min_sol_growth_second_half: float = 0.5
+    min_unique_buyers: int = 8  # distinct buying wallets in the window (stream path)
     max_top_holder_pct: float = 0.08
     # getTokenLargestAccounts needs a Chainstack Dedicated Node. When the RPC
     # refuses it, True skips every coin; False trades without the holder check.
@@ -90,6 +94,7 @@ class Snapshot:
     top10_pct: float | None
     dev_pct_start: float
     dev_pct_end: float
+    unique_buyers: int | None = None  # None: not measured (RPC path)
 
 
 def judge_name(symbol: str, name: str, cfg: GateConfig) -> str | None:
@@ -117,6 +122,8 @@ def judge_snapshot(s: Snapshot, cfg: GateConfig) -> str | None:
             f"momentum fading: +{s.sol_end - s.sol_mid:.2f} SOL in second half "
             f"(< {cfg.min_sol_growth_second_half})"
         )
+    if s.unique_buyers is not None and s.unique_buyers < cfg.min_unique_buyers:
+        return f"only {s.unique_buyers} distinct buyers (< {cfg.min_unique_buyers})"
     if s.top_holder_pct is None or s.top10_pct is None:
         if cfg.require_holder_check:
             return "holder data unavailable from this RPC"
@@ -260,6 +267,77 @@ class QualityGate:
             f"top {_pct(top)}, top10 {_pct(top10)}, dev {dev_start:.1%}->{dev_end:.1%}"
         )
         reason = judge_snapshot(snap, self.cfg)
+        if reason is None:
+            self.stats["passed"] += 1
+        logger.info(
+            f"[gate] passed {self.stats['passed']} of {self.stats['seen']} coins evaluated"
+        )
+        return reason
+
+    async def evaluate_stream(self, token_info: TokenInfo, stream: Any) -> str | None:
+        """Watch the coin through a trade stream; reason to skip, or None to buy.
+
+        ``stream`` is a PumpPortalListener: ``launches`` holds the create
+        message, ``watch``/``unwatch`` collect trades. No RPC is used unless
+        the coin passes everything else, then one holder lookup.
+        """
+        self.stats["seen"] += 1
+        reason = self.quick_reject(token_info)
+        if reason:
+            return reason
+        mint = str(token_info.mint)
+        launch = stream.launches.get(mint)
+        if launch is None:
+            return "no launch data from the stream"
+        initial_v = INITIAL_VIRTUAL_SOL
+        watch = await stream.watch(mint)
+        try:
+            await asyncio.sleep(self.cfg.observe_seconds / 2)
+            v_mid = watch.last_v_sol or launch.v_sol
+            await asyncio.sleep(self.cfg.observe_seconds / 2)
+            v_end = watch.last_v_sol or v_mid
+        finally:
+            await stream.unwatch(mint)
+
+        creator = launch.creator
+        buyers = {e.get("traderPublicKey") for e in watch.events if e.get("txType") == "buy"}
+        buyers.discard(creator)
+        dev_tokens_end = launch.initial_buy_tokens
+        for e in watch.events:
+            if e.get("traderPublicKey") == creator and isinstance(e.get("newTokenBalance"), (int, float)):
+                dev_tokens_end = float(e["newTokenBalance"])
+        dev_sold = any(
+            e.get("traderPublicKey") == creator and e.get("txType") == "sell" for e in watch.events
+        )
+        supply_tokens = PUMP_TOTAL_SUPPLY / 10**6
+        dev_start = launch.initial_buy_tokens / supply_tokens
+        dev_end = dev_tokens_end / supply_tokens
+        if dev_sold and dev_end >= dev_start:
+            dev_end = dev_start - 1e-6  # a dev sell counts even if they rebought
+
+        snap = Snapshot(
+            sol_start=max(0.0, launch.v_sol - initial_v),
+            sol_mid=max(0.0, v_mid - initial_v),
+            sol_end=max(0.0, v_end - initial_v),
+            complete=False,
+            top_holder_pct=None,
+            top10_pct=None,
+            dev_pct_start=dev_start,
+            dev_pct_end=dev_end,
+            unique_buyers=len(buyers),
+        )
+        reason = judge_snapshot(snap, self.cfg)
+        if reason is None and not self.holders_unavailable:
+            try:
+                snap.top_holder_pct, snap.top10_pct = await self._holders(token_info)
+            except Exception as e:  # noqa: BLE001
+                return f"could not read holders ({e})"
+            reason = judge_snapshot(snap, self.cfg)
+        logger.info(
+            f"[gate] {token_info.symbol}: SOL {snap.sol_start:.2f}->{snap.sol_mid:.2f}->"
+            f"{snap.sol_end:.2f}, buyers {snap.unique_buyers}, trades {len(watch.events)}, "
+            f"top {_pct(snap.top_holder_pct)}, dev {dev_start:.1%}->{dev_end:.1%}"
+        )
         if reason is None:
             self.stats["passed"] += 1
         logger.info(

@@ -1,0 +1,14 @@
+# Manual live check of the PumpPortal listener and stream gate. No secrets, no funds.
+name: Check PumpPortal stream
+on: workflow_dispatch
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --frozen --no-dev && uv pip install -e .
+      - run: uv run --no-sync tools/check_pumpportal.py

@@ -85,7 +85,7 @@ CONFIG_VALIDATION_RULES = [
 
 # Valid values for enum-like fields
 VALID_VALUES = {
-    "filters.listener_type": ["logs", "blocks", "geyser", "shreds"],
+    "filters.listener_type": ["logs", "blocks", "geyser", "shreds", "pumpportal"],
     "cleanup.mode": ["disabled", "on_fail", "after_sell", "post_session"],
     "trade.exit_strategy": ["time_based", "tp_sl", "manual"],
     "platform": ["pump_fun", "lets_bonk", "stonk_fun"],
@@ -93,7 +93,7 @@ VALID_VALUES = {
 
 # Platform-specific listener compatibility
 PLATFORM_LISTENER_COMPATIBILITY = {
-    Platform.PUMP_FUN: ["logs", "blocks", "geyser", "shreds"],
+    Platform.PUMP_FUN: ["logs", "blocks", "geyser", "shreds", "pumpportal"],
     Platform.LETS_BONK: ["blocks", "geyser"],
     Platform.STONK_FUN: ["blocks", "geyser"],
 }

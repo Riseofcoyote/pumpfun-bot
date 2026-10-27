@@ -84,6 +84,15 @@ class ListenerFactory:
             logger.info("Created Universal Logs listener for token monitoring")
             return listener
 
+        elif listener_type == "pumpportal":
+            # PumpPortal's free stream: pump.fun creates plus per-coin trades,
+            # without spending the RPC plan on logsSubscribe.
+            from monitoring.pumpportal_listener import PumpPortalListener
+
+            listener = PumpPortalListener()
+            logger.info("Created PumpPortal listener for token monitoring")
+            return listener
+
         elif listener_type == "blocks":
             if not wss_endpoint:
                 raise ValueError("WebSocket endpoint is required for blocks listener")
@@ -100,7 +109,7 @@ class ListenerFactory:
         else:
             raise ValueError(
                 f"Invalid listener type '{listener_type}'. "
-                f"Must be one of: 'logs', 'blocks', 'geyser', 'shreds'"
+                f"Must be one of: 'logs', 'blocks', 'geyser', 'shreds', 'pumpportal'"
             )
 
     @staticmethod
@@ -110,7 +119,7 @@ class ListenerFactory:
         Returns:
             List of supported listener type strings
         """
-        return ["logs", "blocks", "geyser", "shreds"]
+        return ["logs", "blocks", "geyser", "shreds", "pumpportal"]
 
     @staticmethod
     def get_platform_compatible_listeners(platform: Platform) -> list[str]:
@@ -120,7 +129,7 @@ class ListenerFactory:
             platform: Platform to check compatibility for
         """
         if platform == Platform.PUMP_FUN:
-            return ["logs", "blocks", "geyser", "shreds"]
+            return ["logs", "blocks", "geyser", "shreds", "pumpportal"]
         elif platform in (Platform.LETS_BONK, Platform.STONK_FUN):
             return ["blocks", "geyser"]
         else:
