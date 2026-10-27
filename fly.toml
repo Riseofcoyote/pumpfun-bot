@@ -7,6 +7,7 @@ primary_region = "ewr"
 [[mounts]]
   source = "bot_data"
   destination = "/data"
+  initial_size = "1gb"   # Fly creates this volume automatically on first deploy
 
 [[vm]]
   size = "shared-cpu-1x"
