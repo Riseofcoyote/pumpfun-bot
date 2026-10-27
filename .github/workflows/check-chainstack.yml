@@ -1,0 +1,60 @@
+# Manual check that the Chainstack endpoints work: HTTPS answers, and the
+# WebSocket delivers pump.fun log events (what the bot listens to).
+# Needs repo secrets SOLANA_NODE_RPC_ENDPOINT and SOLANA_NODE_WSS_ENDPOINT.
+# Never prints the endpoints (they contain the API key; GitHub also masks them).
+name: Check Chainstack endpoints
+on: workflow_dispatch
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Secrets present
+        env:
+          RPC: ${{ secrets.SOLANA_NODE_RPC_ENDPOINT }}
+          WSS: ${{ secrets.SOLANA_NODE_WSS_ENDPOINT }}
+        run: |
+          [ -n "$RPC" ] || { echo "::error::Secret SOLANA_NODE_RPC_ENDPOINT is missing"; exit 1; }
+          [ -n "$WSS" ] || { echo "::error::Secret SOLANA_NODE_WSS_ENDPOINT is missing"; exit 1; }
+          case "$RPC" in https://*) ;; *) echo "::error::RPC endpoint must start with https://"; exit 1;; esac
+          case "$WSS" in wss://*) ;; *) echo "::error::WSS endpoint must start with wss://"; exit 1;; esac
+          echo "Both secrets present and well-formed."
+      - name: HTTPS endpoint
+        env:
+          RPC: ${{ secrets.SOLANA_NODE_RPC_ENDPOINT }}
+        run: |
+          for m in getHealth getSlot; do
+            out=$(curl -sS -m 15 -w ' HTTP %{http_code}' -X POST -H 'Content-Type: application/json' \
+              -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$m\"}" "$RPC" 2>&1) || true
+            echo "$m -> $out"
+          done
+          echo "$out" | grep -q '"result"' || { echo "::error::HTTPS endpoint did not return a result"; exit 1; }
+      - name: WebSocket endpoint (pump.fun logs, 20s)
+        env:
+          WSS: ${{ secrets.SOLANA_NODE_WSS_ENDPOINT }}
+        run: |
+          pip install -q websockets==13.1
+          python - <<'PY'
+          import asyncio, json, os, websockets
+          PUMP = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
+          async def main():
+              async with websockets.connect(os.environ["WSS"], open_timeout=15) as ws:
+                  await ws.send(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "logsSubscribe",
+                      "params": [{"mentions": [PUMP]}, {"commitment": "processed"}]}))
+                  reply = json.loads(await asyncio.wait_for(ws.recv(), 15))
+                  if "error" in reply:
+                      raise SystemExit(f"logsSubscribe refused: {reply['error']}")
+                  print("Subscribed. Counting pump.fun events for 20s...")
+                  n, end = 0, asyncio.get_running_loop().time() + 20
+                  while asyncio.get_running_loop().time() < end:
+                      try:
+                          await asyncio.wait_for(ws.recv(), 5); n += 1
+                      except asyncio.TimeoutError:
+                          pass
+                  print(f"Received {n} pump.fun events in 20s")
+                  if n == 0:
+                      raise SystemExit("Subscribed but no events arrived")
+          asyncio.run(main())
+          PY
