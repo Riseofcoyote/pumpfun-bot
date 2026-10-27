@@ -17,3 +17,10 @@ primary_region = "ewr"
 
 [processes]
   app = "sh -c 'mkdir -p /data/trades /data/logs && exec uv run --no-sync pump_bot'"
+
+# The bot exits with code 0 if its trading process stops, and Fly's default
+# (on-failure) does not restart on code 0. Always restart instead.
+[[restart]]
+  policy = "always"
+  retries = 10
+  processes = ["app"]
