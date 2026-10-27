@@ -39,6 +39,7 @@ from platforms import get_platform_implementations
 from trading.base import TradeResult
 from trading.platform_aware import PlatformAwareBuyer, PlatformAwareSeller
 from trading.position import ExitReason, Position
+from trading.quality_gate import GateConfig, QualityGate
 from utils.logger import get_logger
 
 # Try to use uvloop on Unix or winloop on Windows for better performance
@@ -195,6 +196,8 @@ class UniversalTrader:
         compute_units: dict | None = None,
         # Node provider configuration
         max_rps: float = 25.0,
+        # Pre-buy quality gate (see trading/quality_gate.py); None disables it
+        quality_gate: dict | None = None,
     ):
         """Initialize the universal trader."""
         # Core components
@@ -325,6 +328,18 @@ class UniversalTrader:
         # Coins whose graduation has been logged, so it is said once.
         self._graduated_mints: set[Pubkey] = set()
         self.token_timestamps: dict[str, float] = {}
+
+        gate_cfg = GateConfig.from_dict(quality_gate) if quality_gate else None
+        self.quality_gate: QualityGate | None = None
+        if gate_cfg and gate_cfg.enabled:
+            if extreme_fast_mode:
+                raise ValueError(  # noqa: TRY003
+                    "quality_gate needs trade.extreme_fast_mode: false - "
+                    "extreme fast mode buys a fixed token amount without pricing"
+                )
+            self.quality_gate = QualityGate(
+                gate_cfg, self.solana_client, self.platform_implementations.curve_manager
+            )
 
     async def _resolve_quote_token_programs(self) -> None:
         """Warm the quote-mint token-program and decimals caches at startup.
@@ -565,6 +580,8 @@ class UniversalTrader:
 
         # Record timestamp when token was discovered
         self.token_timestamps[token_key] = monotonic()
+        if self.quality_gate:
+            self.quality_gate.note_launch(token_info)
 
         await self.token_queue.put(token_info)
         logger.info(
@@ -654,8 +671,24 @@ class UniversalTrader:
                 return
             token_quote_mint = normalize_quote_mint(token_info.quote_mint)
 
+            if self.quality_gate:
+                gate = self.quality_gate
+                if not gate.cfg.dry_run and await gate.wallet_below_floor(
+                    self.wallet.pubkey
+                ):
+                    logger.warning("Wallet at floor - not buying. Stop the bot or top up.")
+                    return
+                reason = await gate.evaluate(token_info, self._get_pool_address(token_info))
+                if reason:
+                    logger.info(f"[gate] skip {token_info.symbol}: {reason}")
+                    return
+                if gate.cfg.dry_run:
+                    logger.info(f"[gate] DRY RUN - would buy {token_info.symbol}; paper tracking")
+                    await gate.paper_trade(token_info, self._read_price)
+                    return
+                logger.info(f"[gate] {token_info.symbol} passed all checks - buying")
             # Wait for pool/curve to stabilize (unless in extreme fast mode)
-            if not self.extreme_fast_mode:
+            elif not self.extreme_fast_mode:
                 await self._save_token_info(token_info)
                 logger.info(
                     f"Waiting for {self.wait_time_after_creation} seconds for the pool/curve to stabilize..."

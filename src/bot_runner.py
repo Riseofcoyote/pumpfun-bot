@@ -162,6 +162,8 @@ async def start_bot(config_path: str):
             compute_units=cfg.get("compute_units", {}),
             # Node provider configuration
             max_rps=cfg.get("node", {}).get("max_rps", 25),
+            # Pre-buy quality gate
+            quality_gate=cfg.get("quality_gate"),
         )
 
         await trader.start()

@@ -1,0 +1,79 @@
+# Rock's filtered bot. Watches each new pump.fun coin for 30s and buys only if
+# real buyers are piling in, holders aren't concentrated and the dev isn't dumping.
+# START WITH quality_gate.dry_run: true (paper trades only), review
+# trades/paper_trades.csv, and only then flip dry_run to false.
+
+name: "rock-gated"
+env_file: ".env"
+rpc_endpoint: "${SOLANA_NODE_RPC_ENDPOINT}"
+wss_endpoint: "${SOLANA_NODE_WSS_ENDPOINT}"
+private_key: "${SOLANA_PRIVATE_KEY}"
+
+enabled: true
+separate_process: true
+platform: "pump_fun"
+
+trade:
+  buy_amount: 0.01          # SOL per trade (~$30 wallet -> small, many tries)
+  buy_slippage: 0.2         # 20%: momentum coins move fast between check and fill
+  sell_slippage: 0.3        # exits must fill even into a drop
+  exit_strategy: "tp_sl"
+  take_profit_percentage: 0.5   # sell at +50%
+  stop_loss_percentage: 0.25    # cut at -25%
+  max_hold_time: 120            # seconds; sell whatever happens after 2 min
+  price_check_interval: 2
+  max_exit_sell_attempts: 5
+  extreme_fast_mode: false      # required by the quality gate: price before buying
+  curve_refresh_budget: 2.0
+  trust_create_event: true
+
+priority_fees:
+  enable_dynamic: false
+  enable_fixed: true
+  fixed_amount: 100_000     # microlamports per CU; ~0.00001 SOL per tx
+  extra_percentage: 0.0
+  hard_cap: 200_000
+
+compute_units: {}
+
+filters:
+  match_string: null
+  bro_address: null
+  listener_type: "logs"     # logsSubscribe works on Chainstack
+  max_token_age: 3          # only start watching coins seen within 3 seconds
+  marry_mode: false
+  yolo_mode: true           # keep going coin after coin (one at a time)
+
+quality_gate:
+  enabled: true
+  dry_run: true             # PAPER MODE. Set false to trade real SOL.
+  observe_seconds: 30       # watch window before deciding
+  min_sol_raised: 4.0       # real SOL bought into the curve by end of window
+  max_sol_raised: 45.0      # skip if it already ran (graduation is ~85 SOL)
+  min_sol_growth_second_half: 0.5   # still being bought, not peaked
+  max_top_holder_pct: 0.08  # no single wallet (besides the curve) over 8%
+  max_top10_holders_pct: 0.30
+  max_dev_holding_pct: 0.05
+  skip_if_dev_sold: true
+  max_launches_per_creator: 1       # skip serial launchers
+  blocked_words: ["test", "rug", "scam", "honeypot", "airdrop"]
+  wallet_floor_sol: 0.03    # stop buying once the wallet falls to this
+  paper_take_profit: 0.5    # keep these equal to the trade: section above
+  paper_stop_loss: 0.25
+  paper_max_hold: 120
+  paper_check_interval: 3
+  paper_round_trip_cost_pct: 0.03   # pump.fun fees + slippage, both ways
+
+retries:
+  max_attempts: 2
+  wait_after_creation: 0
+  wait_after_buy: 15
+  wait_before_new_token: 2
+
+cleanup:
+  mode: "after_sell"        # reclaim the ~0.002 SOL account rent after every trade
+  force_close_with_burn: false
+  with_priority_fee: false
+
+node:
+  max_rps: 20
