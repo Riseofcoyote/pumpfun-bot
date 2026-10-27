@@ -114,6 +114,10 @@ def load_bot_config(path: str) -> dict:
         else:
             load_dotenv(env_file, override=True)
 
+    # A disabled bot never runs, so don't demand its ${VAR}s (e.g. GEYSER_*).
+    if config.get("enabled", True) is False:
+        return config
+
     resolve_env_vars(config)
 
     # Set default platform if not specified (backward compatibility)

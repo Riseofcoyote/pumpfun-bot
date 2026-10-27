@@ -53,5 +53,20 @@ class Wallet:
         Returns:
             Solana keypair
         """
-        private_key_bytes = base58.b58decode(private_key)
-        return Keypair.from_bytes(private_key_bytes)
+        # Pasted secrets often carry stray whitespace or quotes; the error
+        # messages never echo the key itself.
+        key = private_key.strip().strip("'\"").strip()
+        if len(key.split()) > 1:
+            raise ValueError(  # noqa: TRY003
+                "SOLANA_PRIVATE_KEY contains spaces - this looks like a seed phrase. "
+                "Use the base58 private key (one long string, no spaces) from the "
+                "wallet's 'Export private key' option."
+            )
+        try:
+            private_key_bytes = base58.b58decode(key)
+            return Keypair.from_bytes(private_key_bytes)
+        except ValueError:
+            raise ValueError(  # noqa: TRY003
+                f"SOLANA_PRIVATE_KEY is not a valid base58 private key "
+                f"({len(key)} characters; expected about 87-88)"
+            ) from None

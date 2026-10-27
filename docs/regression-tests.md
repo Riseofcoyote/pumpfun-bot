@@ -10,6 +10,7 @@ individual scripts for a subset.
 
 | Script | Checks |
 |---|---|
+| `verify_secret_parsing.py` | private key with stray whitespace/quotes loads, seed phrase gives a clear error, disabled configs skip their env vars |
 | `verify_quality_gate.py` | quality-gate skip/buy decisions, curve-vault exclusion from holder shares, dev-sell detection, wallet floor, paper-trade CSV |
 | `verify_v2_account_layout.py` | buy_v2/sell_v2 account layouts, PDA/ATA derivations, encoding — against `idl/pump_fun_idl.json` |
 | `verify_curve_account_sizes.py` | 125/151/256-byte curves all decode, and nothing filters on account length |
