@@ -20,6 +20,12 @@ from monitoring import pumpportal_listener as pp  # noqa: E402
 from trading.quality_gate import GateConfig, QualityGate  # noqa: E402
 
 
+def note(text: str) -> None:
+    """Print, and also emit a GitHub annotation so the result is readable via the API."""
+    print(text)
+    print("::notice::" + text.replace("%", "%25").replace("\n", " ")[:900])
+
+
 async def raw_sample() -> None:
     async with websockets.connect(pp.PUMPPORTAL_WSS) as ws:
         await ws.send(json.dumps({"method": "subscribeNewToken"}))
@@ -30,16 +36,16 @@ async def raw_sample() -> None:
                 create = msg
                 break
             print("non-create message:", json.dumps(msg)[:300])
-        print("RAW CREATE:", json.dumps(create)[:900])
+        note("RAW CREATE: " + json.dumps(create)[:850])
         await ws.send(json.dumps({"method": "subscribeTokenTrade", "keys": [create["mint"]]}))
         try:
             for _ in range(40):
                 msg = json.loads(await asyncio.wait_for(ws.recv(), 20))
                 if msg.get("txType") in ("buy", "sell"):
-                    print("RAW TRADE:", json.dumps(msg)[:900])
+                    note("RAW TRADE: " + json.dumps(msg)[:850])
                     break
         except TimeoutError:
-            print("no trade on that coin within 20s")
+            note("no trade on that coin within 20s")
 
 
 async def main() -> int:
@@ -61,15 +67,15 @@ async def main() -> int:
     task = asyncio.create_task(listener.listen_for_tokens(on_token))
     await asyncio.sleep(75)
     task.cancel()
-    print(f"\nlaunches received in 75s: {len(seen)}")
+    note(f"launches received in 75s: {len(seen)}")
     for t in seen[:3]:
         print(f"  {t.symbol}: mint={t.mint} curve={t.bonding_curve} creator={t.creator}")
     v = [l.v_sol for l in list(listener.launches.values())[:10]]
-    print("launch vSolInBondingCurve samples:", v)
+    note(f"launch vSolInBondingCurve samples: {v}")
     for sym, r in results:
-        print(f"  gate {sym}: {'PASS' if r is None else 'skip - ' + r}")
+        note(f"gate {sym}: {'PASS' if r is None else 'skip - ' + r}")
     ok = len(seen) > 0 and all(29 <= x <= 120 for x in v if x)
-    print("RESULT:", "OK" if ok else "CHECK FAILED")
+    note(f"RESULT: {'OK' if ok else 'CHECK FAILED'}")
     return 0 if ok else 1
 
 
