@@ -137,7 +137,9 @@ def resolve_env_vars(config: dict) -> None:
             env_value = os.getenv(env_var)
             if env_value is None:
                 raise ValueError(f"Environment variable '{env_var}' not found")
-            return env_value
+            # Secrets pasted on a phone often gain spaces, newlines or quotes,
+            # which turn an endpoint URL into one no request can reach.
+            return env_value.strip().strip("'\"").strip()
         return value
 
     def resolve_all(d):

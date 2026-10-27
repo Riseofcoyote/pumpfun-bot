@@ -34,6 +34,13 @@ with tempfile.TemporaryDirectory() as d:
     except ValueError as e:
         check(False, f"disabled config loads without its env vars ({e})")
 
+from config_loader import resolve_env_vars  # noqa: E402
+
+os.environ["PASTED_URL_TEST"] = '  "https://example.invalid/abc"\n'
+c = {"rpc_endpoint": "${PASTED_URL_TEST}"}
+resolve_env_vars(c)
+check(c["rpc_endpoint"] == "https://example.invalid/abc", "endpoint secret with spaces/quotes cleaned")
+
 try:
     import base58
     from solders.keypair import Keypair
