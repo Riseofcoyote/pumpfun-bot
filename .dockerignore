@@ -1,0 +1,6 @@
+.git
+.venv
+.env
+logs
+trades
+__pycache__

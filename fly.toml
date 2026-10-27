@@ -1,0 +1,16 @@
+# Fly.io app for the filtered pump.fun bot. Runs one always-on machine, no web port.
+app = "rock-pumpfun-bot"
+primary_region = "ewr"
+
+[build]
+
+[[mounts]]
+  source = "bot_data"
+  destination = "/data"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
+
+[processes]
+  app = "uv run --no-sync pump_bot"
