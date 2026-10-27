@@ -24,9 +24,10 @@ from time import monotonic
 from typing import Any
 
 from solders.pubkey import Pubkey
+from spl.token.instructions import get_associated_token_address
 
 from core.client import SolanaClient
-from core.pubkeys import WSOL_MINT, normalize_quote_mint
+from core.pubkeys import SystemAddresses, WSOL_MINT, normalize_quote_mint
 from interfaces.core import TokenInfo
 from utils.logger import get_logger
 
@@ -47,6 +48,9 @@ class GateConfig:
     max_sol_raised: float = 45.0
     min_sol_growth_second_half: float = 0.5
     max_top_holder_pct: float = 0.08
+    # getTokenLargestAccounts needs a Chainstack Dedicated Node. When the RPC
+    # refuses it, True skips every coin; False trades without the holder check.
+    require_holder_check: bool = False
     max_top10_holders_pct: float = 0.30
     max_dev_holding_pct: float = 0.05
     skip_if_dev_sold: bool = True
@@ -81,8 +85,8 @@ class Snapshot:
     sol_mid: float
     sol_end: float
     complete: bool
-    top_holder_pct: float
-    top10_pct: float
+    top_holder_pct: float | None  # None: the RPC cannot answer getTokenLargestAccounts
+    top10_pct: float | None
     dev_pct_start: float
     dev_pct_end: float
 
@@ -112,15 +116,23 @@ def judge_snapshot(s: Snapshot, cfg: GateConfig) -> str | None:
             f"momentum fading: +{s.sol_end - s.sol_mid:.2f} SOL in second half "
             f"(< {cfg.min_sol_growth_second_half})"
         )
-    if s.top_holder_pct > cfg.max_top_holder_pct:
-        return f"top holder owns {s.top_holder_pct:.1%} (> {cfg.max_top_holder_pct:.0%})"
-    if s.top10_pct > cfg.max_top10_holders_pct:
-        return f"top 10 holders own {s.top10_pct:.1%} (> {cfg.max_top10_holders_pct:.0%})"
+    if s.top_holder_pct is None or s.top10_pct is None:
+        if cfg.require_holder_check:
+            return "holder data unavailable from this RPC"
+    else:
+        if s.top_holder_pct > cfg.max_top_holder_pct:
+            return f"top holder owns {s.top_holder_pct:.1%} (> {cfg.max_top_holder_pct:.0%})"
+        if s.top10_pct > cfg.max_top10_holders_pct:
+            return f"top 10 holders own {s.top10_pct:.1%} (> {cfg.max_top10_holders_pct:.0%})"
     if s.dev_pct_end > cfg.max_dev_holding_pct:
         return f"dev holds {s.dev_pct_end:.1%} (> {cfg.max_dev_holding_pct:.0%})"
     if cfg.skip_if_dev_sold and s.dev_pct_end < s.dev_pct_start - 1e-6:
         return f"dev sold during window ({s.dev_pct_start:.1%} -> {s.dev_pct_end:.1%})"
     return None
+
+
+def _pct(x: float | None) -> str:
+    return "n/a" if x is None else f"{x:.1%}"
 
 
 class QualityGate:
@@ -132,6 +144,7 @@ class QualityGate:
         self.curve_manager = curve_manager
         self.creator_launches: dict[str, int] = {}
         self.stats = {"seen": 0, "passed": 0}
+        self.holders_unavailable = False
 
     def note_launch(self, token_info: TokenInfo) -> None:
         """Count launches per creator; call for every coin detected, bought or not."""
@@ -169,15 +182,26 @@ class QualityGate:
         state = await self.curve_manager.get_pool_state(pool, commitment="processed")
         return state["real_sol_reserves"] / LAMPORTS, bool(state.get("complete"))
 
-    async def _holders(self, token_info: TokenInfo) -> tuple[float, float]:
-        """Top holder and top-10 share of supply, excluding the bonding curve's vault."""
+    async def _holders(self, token_info: TokenInfo) -> tuple[float | None, float | None]:
+        """Top holder and top-10 share of supply, excluding the bonding curve's vault.
+
+        Returns (None, None) once the RPC has refused the method; it is not asked again.
+        """
+        if self.holders_unavailable:
+            return None, None
         resp = await self.client.post_rpc(
             {"jsonrpc": "2.0", "id": 1, "method": "getTokenLargestAccounts",
              "params": [str(token_info.mint), {"commitment": "confirmed"}]},
+            max_retries=1,
             deadline_seconds=5,
         )
         if not resp or "result" not in resp:
-            raise ValueError("getTokenLargestAccounts failed")
+            self.holders_unavailable = True
+            logger.warning(
+                "[gate] RPC refused getTokenLargestAccounts (Chainstack offers it on "
+                "Dedicated Nodes only) - holder-concentration check is off"
+            )
+            return None, None
         curve_vault = str(token_info.associated_bonding_curve or "")
         amounts = [
             int(a["amount"]) for a in resp["result"]["value"] if a["address"] != curve_vault
@@ -187,21 +211,27 @@ class QualityGate:
         return top, sum(amounts[:10]) / PUMP_TOTAL_SUPPLY
 
     async def _dev_pct(self, token_info: TokenInfo) -> float:
+        """Creator's share of supply, read from their associated token account.
+
+        Reads one account with getAccountInfo, which every RPC plan serves;
+        getTokenAccountsByOwner is paid-only on Chainstack.
+        """
         if not token_info.creator:
             return 0.0
+        program = token_info.token_program_id or SystemAddresses.TOKEN_2022_PROGRAM
+        ata = get_associated_token_address(token_info.creator, token_info.mint, program)
         resp = await self.client.post_rpc(
-            {"jsonrpc": "2.0", "id": 1, "method": "getTokenAccountsByOwner",
-             "params": [str(token_info.creator), {"mint": str(token_info.mint)},
-                        {"encoding": "jsonParsed", "commitment": "confirmed"}]},
+            {"jsonrpc": "2.0", "id": 1, "method": "getAccountInfo",
+             "params": [str(ata), {"encoding": "jsonParsed", "commitment": "processed"}]},
             deadline_seconds=5,
         )
         if not resp or "result" not in resp:
-            raise ValueError("getTokenAccountsByOwner failed")
-        total = sum(
-            int(a["account"]["data"]["parsed"]["info"]["tokenAmount"]["amount"])
-            for a in resp["result"]["value"]
-        )
-        return total / PUMP_TOTAL_SUPPLY
+            raise ValueError("getAccountInfo failed for dev token account")
+        value = resp["result"]["value"]
+        if value is None:
+            return 0.0  # no token account: the creator holds none
+        amount = value["data"]["parsed"]["info"]["tokenAmount"]["amount"]
+        return int(amount) / PUMP_TOTAL_SUPPLY
 
     async def evaluate(self, token_info: TokenInfo, pool: Pubkey) -> str | None:
         """Watch the coin for ``observe_seconds``; reason to skip, or None to buy."""
@@ -225,7 +255,7 @@ class QualityGate:
         snap = Snapshot(sol_start, sol_mid, sol_end, done, top, top10, dev_start, dev_end)
         logger.info(
             f"[gate] {token_info.symbol}: SOL {sol_start:.2f}->{sol_mid:.2f}->{sol_end:.2f}, "
-            f"top {top:.1%}, top10 {top10:.1%}, dev {dev_start:.1%}->{dev_end:.1%}"
+            f"top {_pct(top)}, top10 {_pct(top10)}, dev {dev_start:.1%}->{dev_end:.1%}"
         )
         reason = judge_snapshot(snap, self.cfg)
         if reason is None:

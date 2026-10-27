@@ -40,6 +40,10 @@ def healthy(**kw) -> qg.Snapshot:
 
 cfg = qg.GateConfig()
 check(qg.judge_snapshot(healthy(), cfg) is None, "healthy coin passes")
+check(qg.judge_snapshot(healthy(top_holder_pct=None, top10_pct=None), cfg) is None,
+      "missing holder data passes when not required")
+check("unavailable" in (qg.judge_snapshot(healthy(top_holder_pct=None, top10_pct=None),
+      qg.GateConfig(require_holder_check=True)) or ""), "missing holder data skips when required")
 check("raised" in qg.judge_snapshot(healthy(sol_end=2.0, sol_mid=1.0), cfg), "thin coin skipped")
 check("too late" in qg.judge_snapshot(healthy(sol_mid=40, sol_end=50), cfg), "late coin skipped")
 check("momentum" in qg.judge_snapshot(healthy(sol_mid=5.8, sol_end=6.0), cfg), "fading coin skipped")
@@ -83,11 +87,13 @@ class FakeClient:
                 return None
             return {"result": {"value": [{"address": str(a), "amount": str(int(p * SUPPLY))}
                                          for a, p in self.holders]}}
-        if m == "getTokenAccountsByOwner":
+        if m == "getAccountInfo":  # the creator's token account
             pct = self.dev.pop(0) if len(self.dev) > 1 else self.dev[0]
+            if pct == 0:
+                return {"result": {"value": None}}
             amt = str(int(pct * SUPPLY))
-            return {"result": {"value": [{"account": {"data": {"parsed": {"info": {
-                "tokenAmount": {"amount": amt}}}}}}]}}
+            return {"result": {"value": {"data": {"parsed": {"info": {
+                "tokenAmount": {"amount": amt}}}}}}}
         raise AssertionError(m)
 
 
@@ -111,7 +117,16 @@ check(r is not None and "dev sold" in r, "evaluate catches dev selling mid-windo
 
 gate = qg.QualityGate(fast, FakeClient(holders, [0.02], fail_holders=True), FakeCurve([0.5, 3.0, 6.0]))
 r = asyncio.run(gate.evaluate(token(), CURVE))
-check(r is not None and "could not measure" in r, "RPC failure means no buy")
+check(r is None and gate.holders_unavailable, "refused holder lookup: trade on, check switched off")
+
+
+class DeadClient(FakeClient):
+    async def post_rpc(self, body, **kw):
+        return None if body["method"] == "getAccountInfo" else await super().post_rpc(body, **kw)
+
+gate = qg.QualityGate(fast, DeadClient(holders, [0.02]), FakeCurve([0.5, 3.0, 6.0]))
+r = asyncio.run(gate.evaluate(token(), CURVE))
+check(r is not None and "could not measure" in r, "dev lookup failure means no buy")
 
 gate = qg.QualityGate(fast, FakeClient(holders, [0.02]), FakeCurve([0.5, 3, 6]))
 check(gate.quick_reject(token(quote_mint=Pubkey.new_unique())) == "not SOL-paired", "non-SOL pair skipped")

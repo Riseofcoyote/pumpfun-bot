@@ -610,6 +610,11 @@ class UniversalTrader:
                     token_key, current_time
                 )
 
+                # The listener can report one coin twice; never handle it twice
+                # (in live mode that would be a second buy).
+                if token_key in self.processed_tokens:
+                    continue
+
                 if token_age > self.max_token_age:
                     logger.info(
                         f"Skipping token {token_info.symbol} - too old ({token_age:.1f}s > {self.max_token_age}s)"

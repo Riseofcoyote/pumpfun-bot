@@ -53,6 +53,7 @@ quality_gate:
   min_sol_growth_second_half: 0.5   # still being bought, not peaked
   max_top_holder_pct: 0.08  # no single wallet (besides the curve) over 8%
   max_top10_holders_pct: 0.30
+  require_holder_check: false      # holder checks need a Chainstack Dedicated Node; off = trade without them
   max_dev_holding_pct: 0.05
   skip_if_dev_sold: true
   max_launches_per_creator: 1       # skip serial launchers
