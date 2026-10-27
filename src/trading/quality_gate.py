@@ -44,6 +44,7 @@ class GateConfig:
     enabled: bool = True
     dry_run: bool = True
     observe_seconds: float = 30.0
+    max_concurrent_watches: int = 5
     min_sol_raised: float = 4.0
     max_sol_raised: float = 45.0
     min_sol_growth_second_half: float = 0.5
@@ -142,15 +143,16 @@ class QualityGate:
         self.cfg = cfg
         self.client = client
         self.curve_manager = curve_manager
-        self.creator_launches: dict[str, int] = {}
+        self.creator_launches: dict[str, set[str]] = {}
         self.stats = {"seen": 0, "passed": 0}
         self.holders_unavailable = False
 
     def note_launch(self, token_info: TokenInfo) -> None:
         """Count launches per creator; call for every coin detected, bought or not."""
+        # Counted per distinct mint: the listener often reports one coin twice.
         if token_info.creator:
             key = str(token_info.creator)
-            self.creator_launches[key] = self.creator_launches.get(key, 0) + 1
+            self.creator_launches.setdefault(key, set()).add(str(token_info.mint))
 
     def quick_reject(self, token_info: TokenInfo) -> str | None:
         """Checks that need no RPC call."""
@@ -158,7 +160,7 @@ class QualityGate:
             return "not SOL-paired"
         if token_info.is_mayhem_mode:
             return "mayhem-mode coin"
-        launches = self.creator_launches.get(str(token_info.creator), 0)
+        launches = len(self.creator_launches.get(str(token_info.creator), ()))
         if launches > self.cfg.max_launches_per_creator:
             return f"creator launched {launches} coins this session (serial launcher)"
         return judge_name(token_info.symbol, token_info.name, self.cfg)

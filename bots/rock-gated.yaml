@@ -48,6 +48,7 @@ quality_gate:
   enabled: true
   dry_run: false            # LIVE: trades real SOL. Set true for paper mode.
   observe_seconds: 30       # watch window before deciding
+  max_concurrent_watches: 5 # coins watched at once (still only one position at a time)
   min_sol_raised: 4.0       # real SOL bought into the curve by end of window
   max_sol_raised: 45.0      # skip if it already ran (graduation is ~85 SOL)
   min_sol_growth_second_half: 0.5   # still being bought, not peaked

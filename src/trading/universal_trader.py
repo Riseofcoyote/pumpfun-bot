@@ -340,6 +340,10 @@ class UniversalTrader:
             self.quality_gate = QualityGate(
                 gate_cfg, self.solana_client, self.platform_implementations.curve_manager
             )
+        # Gate mode watches several coins at once but holds one position at a
+        # time: the lock covers buy -> exit -> cleanup.
+        self._trade_lock = asyncio.Lock()
+        self._watch_tasks: set[asyncio.Task] = set()
 
     async def _log_wallet(self) -> None:
         """Log the trading wallet's public address and SOL balance (never the key)."""
@@ -641,7 +645,18 @@ class UniversalTrader:
                 logger.info(
                     f"Processing fresh token: {token_info.symbol} (age: {token_age:.1f}s)"
                 )
-                await self._handle_token(token_info)
+                if self.quality_gate:
+                    limit = self.quality_gate.cfg.max_concurrent_watches
+                    if len(self._watch_tasks) >= limit:
+                        logger.info(
+                            f"Skipping {token_info.symbol} - already watching {limit} coins"
+                        )
+                        continue
+                    task = asyncio.create_task(self._handle_token(token_info))
+                    self._watch_tasks.add(task)
+                    task.add_done_callback(self._watch_tasks.discard)
+                else:
+                    await self._handle_token(token_info)
 
             except asyncio.CancelledError:
                 logger.info("Token queue processor was cancelled")
@@ -706,7 +721,19 @@ class UniversalTrader:
                     logger.info(f"[gate] DRY RUN - would buy {token_info.symbol}; paper tracking")
                     await gate.paper_trade(token_info, self._read_price)
                     return
-                logger.info(f"[gate] {token_info.symbol} passed all checks - buying")
+                if self._trade_lock.locked():
+                    logger.info(
+                        f"[gate] {token_info.symbol} passed, but a position is already "
+                        "open - skipping (one trade at a time)"
+                    )
+                    return
+                async with self._trade_lock:
+                    if await gate.wallet_below_floor(self.wallet.pubkey):
+                        logger.warning("Wallet at floor - not buying. Stop the bot or top up.")
+                        return
+                    logger.info(f"[gate] {token_info.symbol} passed all checks - buying")
+                    await self._buy_and_exit(token_info, token_quote_mint)
+                return
             # Wait for pool/curve to stabilize (unless in extreme fast mode)
             elif not self.extreme_fast_mode:
                 await self._save_token_info(token_info)
@@ -715,28 +742,31 @@ class UniversalTrader:
                 )
                 await asyncio.sleep(self.wait_time_after_creation)
 
-            # Buy token
-            logger.info(
-                f"Buying {self.quote_amounts[token_quote_mint]:.6f} of quote "
-                f"{token_quote_mint} worth of {token_info.symbol} "
-                f"on {token_info.platform.value}..."
-            )
-            buy_result: TradeResult = await self.buyer.execute(token_info)
-
-            if buy_result.success:
-                await self._handle_successful_buy(token_info, buy_result)
-            else:
-                await self._handle_failed_buy(token_info, buy_result)
-
-            # Only wait for next token in yolo mode
-            if self.yolo_mode:
-                logger.info(
-                    f"YOLO mode enabled. Waiting {self.wait_time_before_new_token} seconds before looking for next token..."
-                )
-                await asyncio.sleep(self.wait_time_before_new_token)
+            await self._buy_and_exit(token_info, token_quote_mint)
 
         except Exception:
             logger.exception(f"Error handling token {token_info.symbol}")
+
+    async def _buy_and_exit(self, token_info: TokenInfo, token_quote_mint: Pubkey) -> None:
+        """Buy the coin, run the exit strategy, then pause in yolo mode."""
+        logger.info(
+            f"Buying {self.quote_amounts[token_quote_mint]:.6f} of quote "
+            f"{token_quote_mint} worth of {token_info.symbol} "
+            f"on {token_info.platform.value}..."
+        )
+        buy_result: TradeResult = await self.buyer.execute(token_info)
+
+        if buy_result.success:
+            await self._handle_successful_buy(token_info, buy_result)
+        else:
+            await self._handle_failed_buy(token_info, buy_result)
+
+        # Only wait for next token in yolo mode
+        if self.yolo_mode:
+            logger.info(
+                f"YOLO mode enabled. Waiting {self.wait_time_before_new_token} seconds before looking for next token..."
+            )
+            await asyncio.sleep(self.wait_time_before_new_token)
 
     async def _handle_successful_buy(
         self, token_info: TokenInfo, buy_result: TradeResult
