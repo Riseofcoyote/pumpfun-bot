@@ -6,6 +6,15 @@ primary_region = "ewr"
 
 [build]
 
+[[mounts]]
+  source = "bot_data"
+  destination = "/data"
+  initial_size = "1gb"   # Fly creates this volume automatically on first deploy
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
+
 [processes]
   app = "sh -c 'mkdir -p /data/trades /data/logs && exec uv run --no-sync pump_bot'"
 
