@@ -1,29 +1,17 @@
-# fly.toml app configuration file generated for pumpfun-bot-w1afdq on 2026-10-27T10:25:42Z
-#
-# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
-#
-
-app = 'pumpfun-bot-w1afdq'
-primary_region = 'ewr'
+# Fly.io app for the filtered pump.fun bot. Runs one always-on machine.
+# Do NOT add [http_service]: the bot has no web server, and Fly would stop the
+# machine whenever no web traffic arrives.
+app = "pumpfun-bot-w1afdq"
+primary_region = "ewr"
 
 [build]
 
 [processes]
   app = "sh -c 'mkdir -p /data/trades /data/logs && exec uv run --no-sync pump_bot'"
 
-[[mounts]]
-  source = 'bot_data'
-  destination = '/data'
-  initial_size = '1gb'
-
-[http_service]
-  internal_port = 8080
-  force_https = true
-  auto_stop_machines = 'stop'
-  auto_start_machines = true
-  min_machines_running = 0
-  processes = ['app']
-
-[[vm]]
-  size = 'shared-cpu-1x'
-  memory = '512mb'
+# The bot exits with code 0 if its trading process stops, and Fly's default
+# (on-failure) does not restart on code 0. Always restart instead.
+[[restart]]
+  policy = "always"
+  retries = 10
+  processes = ["app"]
