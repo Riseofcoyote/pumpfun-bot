@@ -46,7 +46,7 @@ filters:
 
 quality_gate:
   enabled: true
-  dry_run: true             # PAPER MODE. Set false to trade real SOL.
+  dry_run: false            # LIVE: trades real SOL. Set true for paper mode.
   observe_seconds: 30       # watch window before deciding
   min_sol_raised: 4.0       # real SOL bought into the curve by end of window
   max_sol_raised: 45.0      # skip if it already ran (graduation is ~85 SOL)
