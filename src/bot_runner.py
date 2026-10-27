@@ -277,6 +277,10 @@ def main() -> None:
     # printing request URLs, and those URLs carry the provider API key. Redact
     # before the first line is emitted, not after.
     install_secret_redaction()
+    # The per-event decode chatter (~15 lines per coin) buries the trading
+    # lines; keep only its warnings. Child bot processes inherit this.
+    for noisy in ("platforms.pumpfun.event_parser", "monitoring.universal_logs_listener"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
 
     # Log supported platforms and listeners
     try:
