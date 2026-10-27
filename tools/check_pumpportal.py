@@ -27,25 +27,31 @@ def note(text: str) -> None:
 
 
 async def raw_sample() -> None:
+    """Subscribe to trades of the first 8 new coins and report what arrives in 40s."""
     async with websockets.connect(pp.PUMPPORTAL_WSS) as ws:
         await ws.send(json.dumps({"method": "subscribeNewToken"}))
-        create = None
-        for _ in range(20):
-            msg = json.loads(await asyncio.wait_for(ws.recv(), 30))
-            if msg.get("txType") == "create":
-                create = msg
-                break
-            print("non-create message:", json.dumps(msg)[:300])
-        note("RAW CREATE: " + json.dumps(create)[:850])
-        await ws.send(json.dumps({"method": "subscribeTokenTrade", "keys": [create["mint"]]}))
-        try:
-            for _ in range(40):
-                msg = json.loads(await asyncio.wait_for(ws.recv(), 20))
-                if msg.get("txType") in ("buy", "sell"):
+        watched, trades, printed_create = set(), 0, False
+        loop = asyncio.get_running_loop()
+        end = loop.time() + 40
+        while loop.time() < end:
+            try:
+                msg = json.loads(await asyncio.wait_for(ws.recv(), 5))
+            except TimeoutError:
+                continue
+            tx = msg.get("txType")
+            if tx == "create" and len(watched) < 8:
+                if not printed_create:
+                    note("RAW CREATE: " + json.dumps(msg)[:850])
+                    printed_create = True
+                watched.add(msg["mint"])
+                await ws.send(json.dumps({"method": "subscribeTokenTrade", "keys": [msg["mint"]]}))
+            elif tx in ("buy", "sell") and msg.get("mint") in watched:
+                if trades == 0:
                     note("RAW TRADE: " + json.dumps(msg)[:850])
-                    break
-        except TimeoutError:
-            note("no trade on that coin within 20s")
+                trades += 1
+            elif tx not in ("create", "buy", "sell"):
+                note("OTHER MESSAGE: " + json.dumps(msg)[:300])
+        note(f"trade messages for {len(watched)} watched coins in 40s: {trades}")
 
 
 async def main() -> int:
@@ -54,6 +60,16 @@ async def main() -> int:
     gate = QualityGate(GateConfig(observe_seconds=30), client=None, curve_manager=None)
     gate.holders_unavailable = True  # no RPC in this check
     seen, results = [], []
+
+    counts = {}
+    real_watch = listener.watch
+
+    async def counting_watch(mint):
+        w = await real_watch(mint)
+        counts[str(mint)] = w
+        return w
+
+    listener.watch = counting_watch
 
     async def on_token(info):
         seen.append(info)
@@ -74,6 +90,7 @@ async def main() -> int:
     note(f"launch vSolInBondingCurve samples: {v}")
     for sym, r in results:
         note(f"gate {sym}: {'PASS' if r is None else 'skip - ' + r}")
+    note("trades seen per gated coin: " + str([len(w.events) for w in counts.values()]))
     ok = len(seen) > 0 and all(29 <= x <= 120 for x in v if x)
     note(f"RESULT: {'OK' if ok else 'CHECK FAILED'}")
     return 0 if ok else 1

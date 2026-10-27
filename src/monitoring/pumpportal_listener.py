@@ -134,6 +134,7 @@ class PumpPortalListener(BaseTokenListener):
             creator=creator,
             creator_vault=self.address_provider.derive_creator_vault(creator),
             token_program_id=token_program,
+            is_mayhem_mode=bool(msg.get("is_mayhem_mode", False)),
             state_from_event=False,
             creation_timestamp=monotonic(),
         )
