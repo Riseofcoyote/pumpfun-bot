@@ -12,6 +12,7 @@ class ExitReason(Enum):
 
     TAKE_PROFIT = "take_profit"
     STOP_LOSS = "stop_loss"
+    TRAILING_STOP = "trailing_stop"
     MAX_HOLD_TIME = "max_hold_time"
     MANUAL = "manual"
 
@@ -34,6 +35,14 @@ class Position:
     stop_loss_price: float | None = None
     max_hold_time: int | None = None  # seconds
 
+    # Trailing stop: once the price has been up trail_activation_pct, exit when
+    # it falls trail_distance_pct below its peak, and never below entry *
+    # (1 + trail_floor_pct) - a coin that ran up is not allowed to become a loss.
+    trail_activation_pct: float | None = None
+    trail_distance_pct: float | None = None
+    trail_floor_pct: float = 0.0
+    peak_price: float | None = None
+
     # Status
     is_active: bool = True
     exit_reason: ExitReason | None = None
@@ -50,6 +59,9 @@ class Position:
         take_profit_percentage: float | None = None,
         stop_loss_percentage: float | None = None,
         max_hold_time: int | None = None,
+        trail_activation_pct: float | None = None,
+        trail_distance_pct: float | None = None,
+        trail_floor_pct: float = 0.0,
     ) -> "Position":
         """Create a position from a successful buy transaction.
 
@@ -82,6 +94,25 @@ class Position:
             take_profit_price=take_profit_price,
             stop_loss_price=stop_loss_price,
             max_hold_time=max_hold_time,
+            trail_activation_pct=trail_activation_pct,
+            trail_distance_pct=trail_distance_pct,
+            trail_floor_pct=trail_floor_pct,
+            peak_price=entry_price,
+        )
+
+    def trailing_stop_price(self) -> float | None:
+        """The trailing stop's current level, or None while it is not armed."""
+        if (
+            not self.trail_activation_pct
+            or not self.trail_distance_pct
+            or not self.peak_price
+        ):
+            return None
+        if self.peak_price < self.entry_price * (1 + self.trail_activation_pct):
+            return None
+        return max(
+            self.peak_price * (1 - self.trail_distance_pct),
+            self.entry_price * (1 + self.trail_floor_pct),
         )
 
     def should_exit(self, current_price: float) -> tuple[bool, ExitReason | None]:
@@ -96,8 +127,17 @@ class Position:
         if not self.is_active:
             return False, None
 
+        if current_price > 0 and (
+            self.peak_price is None or current_price > self.peak_price
+        ):
+            self.peak_price = current_price
+
         if self.take_profit_price and current_price >= self.take_profit_price:
             return True, ExitReason.TAKE_PROFIT
+
+        trail = self.trailing_stop_price()
+        if trail is not None and current_price <= trail:
+            return True, ExitReason.TRAILING_STOP
 
         if self.stop_loss_price and current_price <= self.stop_loss_price:
             return True, ExitReason.STOP_LOSS

@@ -112,6 +112,9 @@ async def start_bot(config_path: str):
             take_profit_percentage=cfg["trade"].get("take_profit_percentage"),
             stop_loss_percentage=cfg["trade"].get("stop_loss_percentage"),
             max_hold_time=cfg["trade"].get("max_hold_time"),
+            trail_activation_pct=cfg["trade"].get("trail_activation_percentage"),
+            trail_distance_pct=cfg["trade"].get("trail_distance_percentage"),
+            trail_floor_pct=cfg["trade"].get("trail_floor_percentage", 0.0),
             price_check_interval=cfg["trade"].get("price_check_interval", 10),
             max_exit_sell_attempts=cfg["trade"].get(
                 "max_exit_sell_attempts", DEFAULT_MAX_EXIT_SELL_ATTEMPTS

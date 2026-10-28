@@ -244,4 +244,39 @@ with tempfile.TemporaryDirectory() as d:
 check(rows[0]["outcome"] == "take_profit" and rows[0]["net_pnl_pct"] == "57.0",
       "paper trade logs take-profit net of costs")
 
+# First-half growth and the curve transaction count.
+c2 = qg.GateConfig(min_sol_growth_first_half=1.0, min_curve_txs=25, max_avg_sol_per_tx=0.5)
+check("slow start" in (qg.judge_snapshot(healthy(sol_start=2.8, sol_mid=3.0), c2) or ""),
+      "flat first half skipped")
+check(qg.judge_snapshot(healthy(curve_txs=None), c2) is None, "no tx count passes")
+check(qg.judge_snapshot(healthy(curve_txs=40), c2) is None, "busy curve passes")
+check("curve transactions" in (qg.judge_snapshot(healthy(curve_txs=10), c2) or ""),
+      "quiet curve skipped")
+check("big buyers" in (qg.judge_snapshot(healthy(sol_end=20.0, sol_mid=10.0, curve_txs=26), c2) or ""),
+      "few big buys skipped")
+
+# Trailing stop on the position.
+from datetime import datetime as _dt  # noqa: E402
+from trading.position import ExitReason, Position  # noqa: E402
+
+pos = Position.create_from_buy_result(
+    Pubkey.default(), "X", 1.0, 1.0, take_profit_percentage=1.0, stop_loss_percentage=0.2,
+    max_hold_time=180, trail_activation_pct=0.2, trail_distance_pct=0.15, trail_floor_pct=0.05,
+)
+check(pos.should_exit(1.15) == (False, None), "trail not armed below +20%")
+check(pos.should_exit(1.0) == (False, None), "unarmed trail does not fire at entry")
+check(pos.should_exit(1.5) == (False, None), "new high holds")
+check(pos.should_exit(1.3) == (False, None), "dip inside 15% of the high holds")
+check(pos.should_exit(1.27)[1] is ExitReason.TRAILING_STOP, "15% off the high sells")
+pos2 = Position.create_from_buy_result(
+    Pubkey.default(), "Y", 1.0, 1.0, stop_loss_percentage=0.2,
+    trail_activation_pct=0.2, trail_distance_pct=0.15, trail_floor_pct=0.05,
+)
+pos2.should_exit(1.21)
+check(pos2.trailing_stop_price() == 1.05, "floor keeps the stop at +5% after a small run")
+check(pos2.should_exit(1.04)[1] is ExitReason.TRAILING_STOP, "a +20% coin never closes as a loss")
+plain = Position.create_from_buy_result(Pubkey.default(), "Z", 1.0, 1.0, stop_loss_percentage=0.2)
+check(plain.should_exit(0.85) == (False, None) and plain.should_exit(0.8)[1] is ExitReason.STOP_LOSS,
+      "no trail configured: plain stop loss")
+
 sys.exit(1 if FAILS else 0)

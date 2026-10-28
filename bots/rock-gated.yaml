@@ -18,10 +18,15 @@ trade:
   buy_slippage: 0.2         # 20%: momentum coins move fast between check and fill
   sell_slippage: 0.3        # exits must fill even into a drop
   exit_strategy: "tp_sl"
-  take_profit_percentage: 0.5   # sell at +50%
-  stop_loss_percentage: 0.25    # cut at -25%
-  max_hold_time: 120            # seconds; sell whatever happens after 2 min
-  price_check_interval: 2
+  take_profit_percentage: 1.0   # hard cap: sell at +100%
+  stop_loss_percentage: 0.2     # cut at -20%
+  # Trailing stop: once up 20%, sell if it drops 15% off its high, and never
+  # let a coin that got to +20% close below +5% (covers fees).
+  trail_activation_percentage: 0.2
+  trail_distance_percentage: 0.15
+  trail_floor_percentage: 0.05
+  max_hold_time: 180            # seconds; sell whatever happens after 3 min
+  price_check_interval: 1       # check price every second so stops fill nearer the target
   max_exit_sell_attempts: 5
   extreme_fast_mode: false      # required by the quality gate: price before buying
   curve_refresh_budget: 2.0
@@ -50,8 +55,11 @@ quality_gate:
   observe_seconds: 30       # watch window before deciding
   max_concurrent_watches: 3 # coins watched at once (one position at a time); ~2 RPC calls per coin
   min_sol_raised: 4.0       # real SOL bought into the curve by end of window
-  max_sol_raised: 45.0      # skip if it already ran (graduation is ~85 SOL)
-  min_sol_growth_second_half: 0.5   # still being bought, not peaked
+  max_sol_raised: 30.0      # skip if it already ran - buying late is buying the top
+  min_sol_growth_first_half: 1.0    # real buying from the start, not one bundle buy
+  min_sol_growth_second_half: 1.0   # still being bought, not peaked
+  min_curve_txs: 25         # at least this many curve transactions in the window (a crowd)
+  max_avg_sol_per_tx: 0.5   # skip if a few big wallets did the buying
   min_unique_buyers: 8      # only with a PumpPortal API key (trade stream)
   max_top_holder_pct: 0.08  # no single wallet (besides the curve) over 8%
   max_top10_holders_pct: 0.30
@@ -61,9 +69,9 @@ quality_gate:
   max_launches_per_creator: 1       # skip serial launchers
   blocked_words: ["test", "rug", "scam", "honeypot", "airdrop"]
   wallet_floor_sol: 0.03    # stop buying once the wallet falls to this
-  paper_take_profit: 0.5    # keep these equal to the trade: section above
-  paper_stop_loss: 0.25
-  paper_max_hold: 120
+  paper_take_profit: 1.0    # keep these equal to the trade: section above
+  paper_stop_loss: 0.2
+  paper_max_hold: 180
   paper_check_interval: 3
   paper_round_trip_cost_pct: 0.03   # pump.fun fees + slippage, both ways
 

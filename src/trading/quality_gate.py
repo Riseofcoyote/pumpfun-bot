@@ -20,7 +20,7 @@ import csv
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
-from time import monotonic
+from time import monotonic, time
 from typing import Any
 
 from solders.pubkey import Pubkey
@@ -51,6 +51,12 @@ class GateConfig:
     min_sol_raised: float = 4.0
     max_sol_raised: float = 45.0
     min_sol_growth_second_half: float = 0.5
+    min_sol_growth_first_half: float = 0.0
+    # Curve transactions in the window, read with one getSignaturesForAddress:
+    # a few big buys (dev bundle, one wallet pumping) instead of a crowd.
+    # 0 turns the count off; None from the RPC means not measured.
+    min_curve_txs: int = 0
+    max_avg_sol_per_tx: float = 0.0  # 0 = off
     min_unique_buyers: int = 8  # distinct buying wallets in the window (stream path)
     max_top_holder_pct: float = 0.08
     # getTokenLargestAccounts needs a Chainstack Dedicated Node. When the RPC
@@ -95,6 +101,9 @@ class Snapshot:
     dev_pct_start: float
     dev_pct_end: float
     unique_buyers: int | None = None  # None: not measured (RPC path)
+    curve_txs: int | None = (
+        None  # transactions on the curve in the window; None: not measured
+    )
 
 
 def judge_name(symbol: str, name: str, cfg: GateConfig) -> str | None:
@@ -122,6 +131,24 @@ def judge_snapshot(s: Snapshot, cfg: GateConfig) -> str | None:
             f"momentum fading: +{s.sol_end - s.sol_mid:.2f} SOL in second half "
             f"(< {cfg.min_sol_growth_second_half})"
         )
+    if s.sol_mid - s.sol_start < cfg.min_sol_growth_first_half:
+        return (
+            f"slow start: +{s.sol_mid - s.sol_start:.2f} SOL in first half "
+            f"(< {cfg.min_sol_growth_first_half})"
+        )
+    if s.curve_txs is not None:
+        if cfg.min_curve_txs and s.curve_txs < cfg.min_curve_txs:
+            return f"only {s.curve_txs} curve transactions (< {cfg.min_curve_txs})"
+        raised = s.sol_end - s.sol_start
+        if (
+            cfg.max_avg_sol_per_tx
+            and s.curve_txs
+            and raised / s.curve_txs > cfg.max_avg_sol_per_tx
+        ):
+            return (
+                f"{raised / s.curve_txs:.2f} SOL per transaction - a few big buyers "
+                f"(> {cfg.max_avg_sol_per_tx})"
+            )
     if s.unique_buyers is not None and s.unique_buyers < cfg.min_unique_buyers:
         return f"only {s.unique_buyers} distinct buyers (< {cfg.min_unique_buyers})"
     if s.top_holder_pct is None or s.top10_pct is None:
@@ -153,6 +180,7 @@ class QualityGate:
         self.creator_launches: dict[str, set[str]] = {}
         self.stats = {"seen": 0, "passed": 0}
         self.holders_unavailable = False
+        self.signatures_unavailable = False
 
     def note_launch(self, token_info: TokenInfo) -> None:
         """Count launches per creator; call for every coin detected, bought or not."""
@@ -174,15 +202,21 @@ class QualityGate:
 
     async def wallet_below_floor(self, owner: Pubkey) -> bool:
         resp = await self.client.post_rpc(
-            {"jsonrpc": "2.0", "id": 1, "method": "getBalance",
-             "params": [str(owner), {"commitment": "confirmed"}]}
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "getBalance",
+                "params": [str(owner), {"commitment": "confirmed"}],
+            }
         )
         if not resp or "result" not in resp:
             logger.warning("Could not read wallet balance; refusing to buy")
             return True
         sol = resp["result"]["value"] / LAMPORTS
         if sol < self.cfg.wallet_floor_sol:
-            logger.warning(f"Wallet {sol:.4f} SOL is below wallet_floor_sol {self.cfg.wallet_floor_sol}")
+            logger.warning(
+                f"Wallet {sol:.4f} SOL is below wallet_floor_sol {self.cfg.wallet_floor_sol}"
+            )
             return True
         return False
 
@@ -191,7 +225,9 @@ class QualityGate:
         state = await self.curve_manager.get_pool_state(pool, commitment="processed")
         return state["real_sol_reserves"] / LAMPORTS, bool(state.get("complete"))
 
-    async def _holders(self, token_info: TokenInfo) -> tuple[float | None, float | None]:
+    async def _holders(
+        self, token_info: TokenInfo
+    ) -> tuple[float | None, float | None]:
         """Top holder and top-10 share of supply, excluding the bonding curve's vault.
 
         Returns (None, None) once the RPC has refused the method; it is not asked again.
@@ -199,8 +235,12 @@ class QualityGate:
         if self.holders_unavailable:
             return None, None
         resp = await self.client.post_rpc(
-            {"jsonrpc": "2.0", "id": 1, "method": "getTokenLargestAccounts",
-             "params": [str(token_info.mint), {"commitment": "confirmed"}]},
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "getTokenLargestAccounts",
+                "params": [str(token_info.mint), {"commitment": "confirmed"}],
+            },
             max_retries=1,
             deadline_seconds=5,
         )
@@ -213,11 +253,46 @@ class QualityGate:
             return None, None
         curve_vault = str(token_info.associated_bonding_curve or "")
         amounts = [
-            int(a["amount"]) for a in resp["result"]["value"] if a["address"] != curve_vault
+            int(a["amount"])
+            for a in resp["result"]["value"]
+            if a["address"] != curve_vault
         ]
         amounts.sort(reverse=True)
         top = amounts[0] / PUMP_TOTAL_SUPPLY if amounts else 0.0
         return top, sum(amounts[:10]) / PUMP_TOTAL_SUPPLY
+
+    async def _curve_tx_count(self, pool: Pubkey, since: float) -> int | None:
+        """Transactions touching the bonding curve since ``since`` (unix seconds).
+
+        None when the RPC refuses getSignaturesForAddress; it is not asked again.
+        Failed transactions are not counted. Capped at 1000 (one page).
+        """
+        if self.signatures_unavailable or not (
+            self.cfg.min_curve_txs or self.cfg.max_avg_sol_per_tx
+        ):
+            return None
+        resp = await self.client.post_rpc(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "getSignaturesForAddress",
+                "params": [str(pool), {"limit": 1000, "commitment": "confirmed"}],
+            },
+            max_retries=1,
+            deadline_seconds=5,
+        )
+        if not resp or "result" not in resp:
+            self.signatures_unavailable = True
+            logger.warning(
+                "[gate] RPC refused getSignaturesForAddress - transaction-count check is off"
+            )
+            return None
+        return sum(
+            1
+            for r in resp["result"]
+            if r.get("err") is None
+            and (r.get("blockTime") is None or r["blockTime"] >= since)
+        )
 
     async def _dev_pct(self, token_info: TokenInfo) -> float:
         """Creator's share of supply, read from their associated token account.
@@ -230,8 +305,15 @@ class QualityGate:
         program = token_info.token_program_id or SystemAddresses.TOKEN_2022_PROGRAM
         ata = get_associated_token_address(token_info.creator, token_info.mint, program)
         resp = await self.client.post_rpc(
-            {"jsonrpc": "2.0", "id": 1, "method": "getAccountInfo",
-             "params": [str(ata), {"encoding": "jsonParsed", "commitment": "processed"}]},
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "getAccountInfo",
+                "params": [
+                    str(ata),
+                    {"encoding": "jsonParsed", "commitment": "processed"},
+                ],
+            },
             deadline_seconds=5,
         )
         if not resp or "result" not in resp:
@@ -255,6 +337,7 @@ class QualityGate:
         reason = self.quick_reject(token_info)
         if reason:
             return reason
+        started = time() - 5  # the coin launched a few seconds before we saw it
         try:
             if launch is not None:
                 sol_start = max(0.0, launch.v_sol - INITIAL_VIRTUAL_SOL)
@@ -268,20 +351,36 @@ class QualityGate:
                 return "curve completed during window"
             await asyncio.sleep(self.cfg.observe_seconds / 2)
             sol_end, done = await self._sol_raised(pool)
-            early = Snapshot(sol_start, sol_mid, sol_end, done, None, None, dev_start, dev_start)
-            reason = judge_snapshot(early, replace(self.cfg, require_holder_check=False))
+            early = Snapshot(
+                sol_start, sol_mid, sol_end, done, None, None, dev_start, dev_start
+            )
+            reason = judge_snapshot(
+                early, replace(self.cfg, require_holder_check=False)
+            )
             if reason:
                 logger.info(
                     f"[gate] {token_info.symbol}: SOL {sol_start:.2f}->{sol_mid:.2f}->{sol_end:.2f}"
                 )
                 return reason
+            curve_txs = await self._curve_tx_count(pool, started)
             top, top10 = await self._holders(token_info)
             dev_end = await self._dev_pct(token_info)
         except Exception as e:  # noqa: BLE001 - any read failure means "don't buy"
             return f"could not measure coin ({e})"
-        snap = Snapshot(sol_start, sol_mid, sol_end, done, top, top10, dev_start, dev_end)
+        snap = Snapshot(
+            sol_start,
+            sol_mid,
+            sol_end,
+            done,
+            top,
+            top10,
+            dev_start,
+            dev_end,
+            curve_txs=curve_txs,
+        )
         logger.info(
             f"[gate] {token_info.symbol}: SOL {sol_start:.2f}->{sol_mid:.2f}->{sol_end:.2f}, "
+            f"txs {curve_txs if curve_txs is not None else 'n/a'}, "
             f"top {_pct(top)}, top10 {_pct(top10)}, dev {dev_start:.1%}->{dev_end:.1%}"
         )
         reason = judge_snapshot(snap, self.cfg)
@@ -318,14 +417,19 @@ class QualityGate:
             await stream.unwatch(mint)
 
         creator = launch.creator
-        buyers = {e.get("traderPublicKey") for e in watch.events if e.get("txType") == "buy"}
+        buyers = {
+            e.get("traderPublicKey") for e in watch.events if e.get("txType") == "buy"
+        }
         buyers.discard(creator)
         dev_tokens_end = launch.initial_buy_tokens
         for e in watch.events:
-            if e.get("traderPublicKey") == creator and isinstance(e.get("newTokenBalance"), (int, float)):
+            if e.get("traderPublicKey") == creator and isinstance(
+                e.get("newTokenBalance"), (int, float)
+            ):
                 dev_tokens_end = float(e["newTokenBalance"])
         dev_sold = any(
-            e.get("traderPublicKey") == creator and e.get("txType") == "sell" for e in watch.events
+            e.get("traderPublicKey") == creator and e.get("txType") == "sell"
+            for e in watch.events
         )
         supply_tokens = PUMP_TOTAL_SUPPLY / 10**6
         dev_start = launch.initial_buy_tokens / supply_tokens
@@ -391,14 +495,34 @@ class QualityGate:
                 outcome = "stop_loss"
                 break
         pnl = last / entry - 1 - cfg.paper_round_trip_cost_pct
-        logger.info(f"[paper] {token_info.symbol}: {outcome}, net {pnl:+.1%} after costs")
+        logger.info(
+            f"[paper] {token_info.symbol}: {outcome}, net {pnl:+.1%} after costs"
+        )
         path = Path("trades") / "paper_trades.csv"
         path.parent.mkdir(exist_ok=True)
         new = not path.exists()
         with path.open("a", newline="") as f:
             w = csv.writer(f)
             if new:
-                w.writerow(["time", "symbol", "mint", "entry", "exit", "outcome", "net_pnl_pct"])
-            w.writerow([datetime.now().isoformat(timespec="seconds"), token_info.symbol,
-                        str(token_info.mint), f"{entry:.10f}", f"{last:.10f}", outcome,
-                        f"{pnl * 100:.1f}"])
+                w.writerow(
+                    [
+                        "time",
+                        "symbol",
+                        "mint",
+                        "entry",
+                        "exit",
+                        "outcome",
+                        "net_pnl_pct",
+                    ]
+                )
+            w.writerow(
+                [
+                    datetime.now().isoformat(timespec="seconds"),
+                    token_info.symbol,
+                    str(token_info.mint),
+                    f"{entry:.10f}",
+                    f"{last:.10f}",
+                    outcome,
+                    f"{pnl * 100:.1f}",
+                ]
+            )
