@@ -168,6 +168,8 @@ class UniversalTrader:
         take_profit_percentage: float | None = None,
         stop_loss_percentage: float | None = None,
         max_hold_time: int | None = None,
+        trailing_stop_activation: float | None = None,
+        trailing_stop_percentage: float | None = None,
         price_check_interval: int = 10,
         max_exit_sell_attempts: int = DEFAULT_MAX_EXIT_SELL_ATTEMPTS,
         # Priority fee configuration
@@ -293,6 +295,9 @@ class UniversalTrader:
         self.take_profit_percentage = take_profit_percentage
         self.stop_loss_percentage = stop_loss_percentage
         self.max_hold_time = max_hold_time
+        self.trailing_stop_activation = trailing_stop_activation
+        self.trailing_stop_percentage = trailing_stop_percentage
+        self._last_exit_reason: str | None = None
         # The attempt cap is clamped: below 1 would mean "never try to sell".
         self.price_check_interval, self.max_exit_sell_attempts = (
             price_check_interval,
@@ -826,6 +831,7 @@ class UniversalTrader:
             f"on {token_info.platform.value}..."
         )
         sol_before = await self._wallet_sol()
+        self._last_exit_reason = None
         buy_result: TradeResult = await self.buyer.execute(token_info)
 
         if buy_result.success:
@@ -835,7 +841,11 @@ class UniversalTrader:
 
         sol_after = await self._wallet_sol()
         if sol_before is not None and sol_after is not None:
-            outcome = "traded" if buy_result.success else "buy failed"
+            outcome = (
+                (self._last_exit_reason or "exit unknown")
+                if buy_result.success
+                else "buy failed"
+            )
             self._record_ledger(token_info, outcome, sol_after - sol_before)
 
         # Only wait for next token in yolo mode
@@ -905,6 +915,8 @@ class UniversalTrader:
             take_profit_percentage=self.take_profit_percentage,
             stop_loss_percentage=self.stop_loss_percentage,
             max_hold_time=self.max_hold_time,
+            trailing_activation=self.trailing_stop_activation,
+            trailing_pct=self.trailing_stop_percentage,
         )
 
         logger.info(f"Created position: {position}")
@@ -1283,6 +1295,7 @@ class UniversalTrader:
         if sell_result.success:
             # Close position with actual exit price
             position.close_position(sell_result.price, exit_reason)
+            self._last_exit_reason = exit_reason.value
 
             logger.info(f"Successfully exited position: {exit_reason.value}")
             self._log_trade(
@@ -1309,6 +1322,7 @@ class UniversalTrader:
             # The sell landed, only its confirmation was late. Close against the
             # price it was floored at; the real fill was never read back.
             position.close_position(price, exit_reason)
+            self._last_exit_reason = exit_reason.value
             logger.info(f"Position for {token_info.symbol} closed by a late fill")
             await self._cleanup_after_exit(token_info)
         elif verdict is ExitSellVerdict.STOP:

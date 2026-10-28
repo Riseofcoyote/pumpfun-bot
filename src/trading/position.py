@@ -12,6 +12,7 @@ class ExitReason(Enum):
 
     TAKE_PROFIT = "take_profit"
     STOP_LOSS = "stop_loss"
+    TRAILING_STOP = "trailing_stop"
     MAX_HOLD_TIME = "max_hold_time"
     MANUAL = "manual"
 
@@ -34,6 +35,12 @@ class Position:
     stop_loss_price: float | None = None
     max_hold_time: int | None = None  # seconds
 
+    # Trailing stop: once price reaches entry * (1 + activation), sell if it
+    # falls trailing_pct below the highest price seen. None disables it.
+    trailing_activation: float | None = None
+    trailing_pct: float | None = None
+    peak_price: float = 0.0
+
     # Status
     is_active: bool = True
     exit_reason: ExitReason | None = None
@@ -50,6 +57,8 @@ class Position:
         take_profit_percentage: float | None = None,
         stop_loss_percentage: float | None = None,
         max_hold_time: int | None = None,
+        trailing_activation: float | None = None,
+        trailing_pct: float | None = None,
     ) -> "Position":
         """Create a position from a successful buy transaction.
 
@@ -82,6 +91,9 @@ class Position:
             take_profit_price=take_profit_price,
             stop_loss_price=stop_loss_price,
             max_hold_time=max_hold_time,
+            trailing_activation=trailing_activation,
+            trailing_pct=trailing_pct,
+            peak_price=entry_price,
         )
 
     def should_exit(self, current_price: float) -> tuple[bool, ExitReason | None]:
@@ -101,6 +113,16 @@ class Position:
 
         if self.stop_loss_price and current_price <= self.stop_loss_price:
             return True, ExitReason.STOP_LOSS
+
+        if current_price > self.peak_price:
+            self.peak_price = current_price
+        if (
+            self.trailing_activation is not None
+            and self.trailing_pct is not None
+            and self.peak_price >= self.entry_price * (1 + self.trailing_activation)
+            and current_price <= self.peak_price * (1 - self.trailing_pct)
+        ):
+            return True, ExitReason.TRAILING_STOP
 
         # Check max hold time
         if self.should_exit_on_time():

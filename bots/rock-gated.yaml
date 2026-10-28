@@ -20,8 +20,10 @@ trade:
   exit_strategy: "tp_sl"
   take_profit_percentage: 0.5   # sell at +50%
   stop_loss_percentage: 0.25    # cut at -25%
+  trailing_stop_activation: 0.2   # once up 20%, start trailing...
+  trailing_stop_percentage: 0.15  # ...and sell if it drops 15% from its high
   max_hold_time: 120            # seconds; sell whatever happens after 2 min
-  price_check_interval: 2
+  price_check_interval: 1       # check every second: stops fill closer to target
   max_exit_sell_attempts: 5
   extreme_fast_mode: false      # required by the quality gate: price before buying
   curve_refresh_budget: 2.0
