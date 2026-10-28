@@ -60,6 +60,15 @@ class GateConfig:
     max_dev_holding_pct: float = 0.05
     skip_if_dev_sold: bool = True
     max_launches_per_creator: int = 1
+    # Spam waves reuse one symbol from many fresh wallets, dodging the
+    # per-creator check. Skip a symbol seen on more than this many mints.
+    max_same_symbol: int = 2
+    # pump.fun's own launch page gives mints a vanity "pump" suffix; scripted
+    # spam launches usually lack it. True skips mints without it.
+    require_pump_suffix: bool = False
+    # Drop a coin at the half-way read if it has raised less than this (SOL),
+    # freeing its watch slot instead of holding it for the full window.
+    min_sol_at_midpoint: float = 0.0
     min_symbol_len: int = 2
     max_symbol_len: int = 10
     blocked_words: list[str] = field(
@@ -151,6 +160,7 @@ class QualityGate:
         self.client = client
         self.curve_manager = curve_manager
         self.creator_launches: dict[str, set[str]] = {}
+        self.symbol_launches: dict[str, set[str]] = {}
         self.stats = {"seen": 0, "passed": 0}
         self.holders_unavailable = False
 
@@ -160,6 +170,9 @@ class QualityGate:
         if token_info.creator:
             key = str(token_info.creator)
             self.creator_launches.setdefault(key, set()).add(str(token_info.mint))
+        sym = (token_info.symbol or "").strip().lower()
+        if sym:
+            self.symbol_launches.setdefault(sym, set()).add(str(token_info.mint))
 
     def quick_reject(self, token_info: TokenInfo) -> str | None:
         """Checks that need no RPC call."""
@@ -170,6 +183,12 @@ class QualityGate:
         launches = len(self.creator_launches.get(str(token_info.creator), ()))
         if launches > self.cfg.max_launches_per_creator:
             return f"creator launched {launches} coins this session (serial launcher)"
+        if self.cfg.require_pump_suffix and not str(token_info.mint).endswith("pump"):
+            return "mint lacks pump suffix (scripted launch)"
+        sym = (token_info.symbol or "").strip().lower()
+        same = len(self.symbol_launches.get(sym, ()))
+        if same > self.cfg.max_same_symbol:
+            return f"symbol launched on {same} mints this session (spam wave)"
         return judge_name(token_info.symbol, token_info.name, self.cfg)
 
     async def wallet_below_floor(self, owner: Pubkey) -> bool:
@@ -266,6 +285,8 @@ class QualityGate:
             sol_mid, done = await self._sol_raised(pool)
             if done:
                 return "curve completed during window"
+            if sol_mid < self.cfg.min_sol_at_midpoint:
+                return f"only {sol_mid:.2f} SOL at half-way (< {self.cfg.min_sol_at_midpoint})"
             await asyncio.sleep(self.cfg.observe_seconds / 2)
             sol_end, done = await self._sol_raised(pool)
             early = Snapshot(sol_start, sol_mid, sol_end, done, None, None, dev_start, dev_start)
@@ -312,6 +333,11 @@ class QualityGate:
         try:
             await asyncio.sleep(self.cfg.observe_seconds / 2)
             v_mid = watch.last_v_sol or launch.v_sol
+            if v_mid - initial_v < self.cfg.min_sol_at_midpoint:
+                return (
+                    f"only {v_mid - initial_v:.2f} SOL at half-way "
+                    f"(< {self.cfg.min_sol_at_midpoint})"
+                )
             await asyncio.sleep(self.cfg.observe_seconds / 2)
             v_end = watch.last_v_sol or v_mid
         finally:

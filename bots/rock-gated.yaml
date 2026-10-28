@@ -59,6 +59,9 @@ quality_gate:
   max_dev_holding_pct: 0.05
   skip_if_dev_sold: true
   max_launches_per_creator: 1       # skip serial launchers
+  max_same_symbol: 2        # skip spam waves: same ticker on 3+ mints from fresh wallets
+  require_pump_suffix: true # real pump.fun page launches end in "pump"; scripted spam doesn't
+  min_sol_at_midpoint: 1.0  # drop dead coins at 15s instead of holding a slot for 30s
   blocked_words: ["test", "rug", "scam", "honeypot", "airdrop"]
   wallet_floor_sol: 0.03    # stop buying once the wallet falls to this
   paper_take_profit: 0.5    # keep these equal to the trade: section above
