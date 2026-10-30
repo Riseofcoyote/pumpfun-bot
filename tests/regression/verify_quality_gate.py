@@ -11,15 +11,16 @@ import csv
 import os
 import sys
 import tempfile
+from dataclasses import replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
-from solders.pubkey import Pubkey  # noqa: E402
+from solders.pubkey import Pubkey
 
-from core.pubkeys import WSOL_MINT  # noqa: E402
-from interfaces.core import Platform, TokenInfo  # noqa: E402
-from trading import quality_gate as qg  # noqa: E402
+from core.pubkeys import WSOL_MINT
+from interfaces.core import Platform, TokenInfo
+from trading import quality_gate as qg
 
 SUPPLY = qg.PUMP_TOTAL_SUPPLY
 FAILS: list[str] = []
@@ -256,7 +257,6 @@ check("big buyers" in (qg.judge_snapshot(healthy(sol_end=20.0, sol_mid=10.0, cur
       "few big buys skipped")
 
 # Trailing stop on the position.
-from datetime import datetime as _dt  # noqa: E402
 from trading.position import ExitReason, Position  # noqa: E402
 
 pos = Position.create_from_buy_result(
@@ -278,5 +278,110 @@ check(pos2.should_exit(1.04)[1] is ExitReason.TRAILING_STOP, "a +20% coin never 
 plain = Position.create_from_buy_result(Pubkey.default(), "Z", 1.0, 1.0, stop_loss_percentage=0.2)
 check(plain.should_exit(0.85) == (False, None) and plain.should_exit(0.8)[1] is ExitReason.STOP_LOSS,
       "no trail configured: plain stop loss")
+
+# Launch block and funder tracing (trading/launch_forensics.py).
+from trading import launch_forensics as lf  # noqa: E402
+
+sigs = [  # newest first, as getSignaturesForAddress returns them
+    {"signature": "late", "slot": 105, "err": None, "blockTime": 2},
+    {"signature": "b3", "slot": 100, "err": None},
+    {"signature": "bad", "slot": 100, "err": {"x": 1}},
+    {"signature": "b2", "slot": 100, "err": None},
+    {"signature": "create", "slot": 100, "err": None, "blockTime": 1},
+]
+blk = lf.find_launch_block(sigs, "create")
+check(blk is not None and blk.buys == 2 and blk.slot == 100, "launch block counts other ok txs in the create slot")
+check(lf.find_launch_block(sigs, "").buys == 2, "without the create sig the oldest entry stands in")
+check(lf.find_launch_block([{"signature": f"s{i}", "slot": i, "err": None} for i in range(1000)], "") is None,
+      "a full page without the create sig is unknown, not clean")
+check(lf.find_launch_block(sigs[:1], "late").buys == 0, "lone create is a clean launch")
+
+c3 = qg.GateConfig(max_launch_block_buys=2)
+check(qg.judge_snapshot(healthy(launch_block_buys=2), c3) is None, "2 snipers in the launch block pass")
+check("bundled" in (qg.judge_snapshot(healthy(launch_block_buys=3), c3) or ""), "3+ launch-block buys skipped")
+check(qg.judge_snapshot(healthy(launch_block_buys=9), cfg) is None, "launch-block check off by default")
+
+
+def transfer_tx(src, dst, sol, inner=False):
+    ix = {"program": "system", "parsed": {"type": "transfer", "info": {
+        "source": src, "destination": dst, "lamports": int(sol * qg.LAMPORTS)}}}
+    msg = {"instructions": [] if inner else [ix], "accountKeys": [{"pubkey": src, "signer": True}]}
+    meta = {"err": None, "innerInstructions": [{"index": 0, "instructions": [ix]}] if inner else []}
+    return {"transaction": {"message": msg}, "meta": meta}
+
+
+check(lf.funding_transfer(transfer_tx("F", "W", 0.5), "W") == ("F", 0.5), "funding transfer found")
+check(lf.funding_transfer(transfer_tx("F", "W", 0.5, inner=True), "W")[0] == "F", "inner-instruction funding found")
+check(lf.funding_transfer(transfer_tx("F", "W", 0.001), "W") is None, "dust is not funding")
+check(lf.fee_payer(transfer_tx("F", "W", 1)) == "F", "fee payer is the first signer")
+
+mem = lf.CrewMemory(None)
+check("dev funded" in (lf.judge_funding("M", "D", {"D": "X", "B1": "D"}, mem, max_shared_funder_wallets=1, max_crew_earlier_launches=0) or ""), "dev funding a buyer skipped")
+check("linked" in (lf.judge_funding("M", "D", {"D": "F", "B1": "F", "B2": "G"}, mem, max_shared_funder_wallets=1, max_crew_earlier_launches=0) or ""),
+      "two launch wallets on one funder skipped")
+check(lf.judge_funding("M", "D", {"D": "F", "B1": "G"}, mem, max_shared_funder_wallets=1, max_crew_earlier_launches=0) is None, "independent funders pass")
+ex = next(iter(lf.EXCHANGES))
+check(lf.judge_funding("M", "D", {"D": ex, "B1": ex, "B2": ex}, mem, max_shared_funder_wallets=1, max_crew_earlier_launches=0) is None,
+      "shared exchange funder links nobody")
+mem.record("OLD", {"D0": "F"})
+check("repeat crew" in (lf.judge_funding("M", "D", {"D": "F"}, mem, max_shared_funder_wallets=1, max_crew_earlier_launches=0) or ""), "funder behind an earlier coin skipped")
+check(lf.judge_funding("M", "D", {"D": "F"}, mem, max_shared_funder_wallets=1, max_crew_earlier_launches=-1) is None, "crew memory check can be turned off")
+hub = lf.CrewMemory(None, hub_wallets=3)
+hub.record("A", {"w1": "H", "w2": "H", "w3": "H"})
+check(lf.judge_funding("M", "D", {"D": "H", "B": "H"}, hub, max_shared_funder_wallets=1, max_crew_earlier_launches=0) is None, "hub funder treated as a service")
+with tempfile.TemporaryDirectory() as d:
+    path = Path(d) / "crews.json"
+    lf.CrewMemory(path).record("OLD", {"D0": "F"})
+    check(lf.CrewMemory(path).earlier_launches("F", "NEW") == ["OLD"], "crew memory survives a restart")
+
+
+class ForensicClient(FakeClient):
+    """Curve history with a bundled launch block; wallets funded as ``funders`` says."""
+
+    def __init__(self, *a, curve_sigs, payers, funders, **k):
+        super().__init__(*a, **k)
+        self.curve_sigs, self.payers, self.funders, self.calls = curve_sigs, payers, funders, []
+
+    async def post_rpc(self, body, **kw):
+        m, p = body["method"], body["params"]
+        self.calls.append(m)
+        if m == "getSignaturesForAddress":
+            if p[0] == str(CURVE):
+                return {"result": self.curve_sigs}
+            return {"result": [{"signature": f"fund-{p[0]}", "err": None}]}
+        if m == "getTransaction":
+            sig = p[0]
+            if sig.startswith("fund-"):
+                w = sig[5:]
+                return {"result": transfer_tx(self.funders[w], w, 1.0)} if w in self.funders else {"result": None}
+            return {"result": transfer_tx(self.payers[sig], "curve", 0.5)}
+        return await super().post_rpc(body, **kw)
+
+
+creator = Pubkey.new_unique()
+curve_sigs = [{"signature": "b1", "slot": 7, "err": None, "blockTime": None},
+              {"signature": "b2", "slot": 7, "err": None, "blockTime": None},
+              {"signature": "create", "slot": 7, "err": None, "blockTime": None}]
+seeded = _Launch(str(creator), 20_000_000, 30.5)
+seeded.signature = "create"
+fcfg = replace(fast, max_launch_block_buys=2, trace_funders=True, crew_memory_path="")
+fc = ForensicClient(holders, [0.02], curve_sigs=curve_sigs, payers={"b1": "W1", "b2": "W2"},
+                    funders={"W1": "BOSS", "W2": "BOSS", str(creator): "DEVF"})
+r = asyncio.run(qg.QualityGate(fcfg, fc, FakeCurve([3.0, 6.0])).evaluate(
+    token(creator=creator), CURVE, launch=seeded))
+check(r is not None and "linked" in r, "evaluate: launch-block buyers on one funder skipped")
+
+fc = ForensicClient(holders, [0.02], curve_sigs=curve_sigs, payers={"b1": "W1", "b2": "W2"},
+                    funders={"W1": "A", "W2": "B", str(creator): "C"})
+g = qg.QualityGate(fcfg, fc, FakeCurve([3.0, 6.0]))
+r = asyncio.run(g.evaluate(token(creator=creator), CURVE, launch=seeded))
+check(r is None and fc.calls.count("getTransaction") == 5, "evaluate: independent launch wallets pass")
+check(g.crews.earlier_launches("C", "next-coin") == [str(MINT)], "evaluate: traced funders remembered")
+
+fc = ForensicClient(holders, [0.02], curve_sigs=curve_sigs, payers={}, funders={})
+r = asyncio.run(qg.QualityGate(fcfg, fc, FakeCurve([0.4, 0.6])).evaluate(
+    token(creator=creator), CURVE, launch=seeded))
+check(r is not None and "getTransaction" not in fc.calls, "evaluate: thin coin skipped before any tracing")
+
 
 sys.exit(1 if FAILS else 0)

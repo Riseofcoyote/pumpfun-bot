@@ -5,7 +5,8 @@ rugged within a minute, so this gate trades speed for selectivity:
 
 1. cheap name/creator checks the moment the coin is seen,
 2. an observation window (``observe_seconds``) sampling the bonding curve twice,
-3. holder-concentration and dev-wallet checks at the end of the window.
+3. holder-concentration and dev-wallet checks at the end of the window,
+4. launch-block bundle and wallet-funding checks (``launch_forensics``).
 
 The coin is bought only if every check passes. ``dry_run`` logs the would-be
 trade and paper-tracks its outcome to ``trades/paper_trades.csv`` instead of
@@ -27,8 +28,9 @@ from solders.pubkey import Pubkey
 from spl.token.instructions import get_associated_token_address
 
 from core.client import SolanaClient
-from core.pubkeys import SystemAddresses, WSOL_MINT, normalize_quote_mint
+from core.pubkeys import WSOL_MINT, SystemAddresses, normalize_quote_mint
 from interfaces.core import TokenInfo
+from trading import launch_forensics as lf
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -57,6 +59,27 @@ class GateConfig:
     # 0 turns the count off; None from the RPC means not measured.
     min_curve_txs: int = 0
     max_avg_sol_per_tx: float = 0.0  # 0 = off
+    # Other successful transactions in the create's slot (Jito bundle or
+    # snipers), from the same getSignaturesForAddress reply. -1 = off.
+    max_launch_block_buys: int = -1
+    # Trace who funded the dev and launch-block buyers; runs only on a coin that
+    # passed everything else (a few to ~40 RPC calls, within funder_check_budget).
+    trace_funders: bool = False
+    max_traced_wallets: int = 6  # launch-block buyers traced, besides the dev
+    max_shared_funder_wallets: int = 1  # skip if one funder funded more traced wallets
+    max_crew_earlier_launches: int = (
+        0  # skip if a funder was behind more earlier coins; -1 off
+    )
+    funder_check_budget: float = (
+        6.0  # seconds; past it the coin is judged without the check
+    )
+    require_funder_check: bool = (
+        False  # True: an unfinished funder check skips the coin
+    )
+    crew_memory_path: str = "trades/crews.json"  # "" keeps the memory in RAM only
+    crew_hub_wallets: int = (
+        30  # a funder seen topping up this many wallets is a service
+    )
     min_unique_buyers: int = 8  # distinct buying wallets in the window (stream path)
     max_top_holder_pct: float = 0.08
     # getTokenLargestAccounts needs a Chainstack Dedicated Node. When the RPC
@@ -104,6 +127,7 @@ class Snapshot:
     curve_txs: int | None = (
         None  # transactions on the curve in the window; None: not measured
     )
+    launch_block_buys: int | None = None  # None: not measured
 
 
 def judge_name(symbol: str, name: str, cfg: GateConfig) -> str | None:
@@ -149,6 +173,15 @@ def judge_snapshot(s: Snapshot, cfg: GateConfig) -> str | None:
                 f"{raised / s.curve_txs:.2f} SOL per transaction - a few big buyers "
                 f"(> {cfg.max_avg_sol_per_tx})"
             )
+    if (
+        s.launch_block_buys is not None
+        and cfg.max_launch_block_buys >= 0
+        and s.launch_block_buys > cfg.max_launch_block_buys
+    ):
+        return (
+            f"{s.launch_block_buys} buys in the launch block - bundled "
+            f"(> {cfg.max_launch_block_buys})"
+        )
     if s.unique_buyers is not None and s.unique_buyers < cfg.min_unique_buyers:
         return f"only {s.unique_buyers} distinct buyers (< {cfg.min_unique_buyers})"
     if s.top_holder_pct is None or s.top10_pct is None:
@@ -181,6 +214,9 @@ class QualityGate:
         self.stats = {"seen": 0, "passed": 0}
         self.holders_unavailable = False
         self.signatures_unavailable = False
+        self.crews = lf.CrewMemory(
+            cfg.crew_memory_path if cfg.trace_funders else None, cfg.crew_hub_wallets
+        )
 
     def note_launch(self, token_info: TokenInfo) -> None:
         """Count launches per creator; call for every coin detected, bought or not."""
@@ -261,16 +297,24 @@ class QualityGate:
         top = amounts[0] / PUMP_TOTAL_SUPPLY if amounts else 0.0
         return top, sum(amounts[:10]) / PUMP_TOTAL_SUPPLY
 
-    async def _curve_tx_count(self, pool: Pubkey, since: float) -> int | None:
-        """Transactions touching the bonding curve since ``since`` (unix seconds).
+    async def _curve_activity(
+        self, pool: Pubkey, since: float, create_signature: str = ""
+    ) -> tuple[int | None, lf.LaunchBlock | None]:
+        """Curve transactions since ``since`` (unix seconds) and the launch block.
 
-        None when the RPC refuses getSignaturesForAddress; it is not asked again.
+        One getSignaturesForAddress call answers both. (None, None) when the
+        checks are off or the RPC refuses the method; it is not asked again.
         Failed transactions are not counted. Capped at 1000 (one page).
         """
-        if self.signatures_unavailable or not (
-            self.cfg.min_curve_txs or self.cfg.max_avg_sol_per_tx
-        ):
-            return None
+        cfg = self.cfg
+        wanted = (
+            cfg.min_curve_txs
+            or cfg.max_avg_sol_per_tx
+            or cfg.max_launch_block_buys >= 0
+            or cfg.trace_funders
+        )
+        if self.signatures_unavailable or not wanted:
+            return None, None
         resp = await self.client.post_rpc(
             {
                 "jsonrpc": "2.0",
@@ -284,15 +328,60 @@ class QualityGate:
         if not resp or "result" not in resp:
             self.signatures_unavailable = True
             logger.warning(
-                "[gate] RPC refused getSignaturesForAddress - transaction-count check is off"
+                "[gate] RPC refused getSignaturesForAddress - transaction-count and "
+                "launch-block checks are off"
             )
-            return None
-        return sum(
+            return None, None
+        sigs = resp["result"]
+        txs = sum(
             1
-            for r in resp["result"]
+            for r in sigs
             if r.get("err") is None
             and (r.get("blockTime") is None or r["blockTime"] >= since)
         )
+        return txs, lf.find_launch_block(sigs, create_signature)
+
+    async def funding_reason(
+        self, token_info: TokenInfo, block: lf.LaunchBlock | None
+    ) -> str | None:
+        """Trace the dev and launch-block buyers to their funders; reason to skip or None.
+
+        Every traced coin is remembered in crew memory, skipped or not. Runs
+        within ``funder_check_budget``; when it runs out the coin passes unless
+        ``require_funder_check``.
+        """
+        cfg = self.cfg
+        if not cfg.trace_funders or block is None:
+            return None
+        mint = str(token_info.mint)
+        creator = str(token_info.creator) if token_info.creator else None
+
+        async def run() -> str | None:
+            post = self.client.post_rpc
+            wallets = await lf.launch_block_buyers(post, block, cfg.max_traced_wallets)
+            if creator:
+                wallets.setdefault(creator, block.create_signature)
+            funded = await lf.trace_funders(post, wallets)
+            reason = lf.judge_funding(
+                mint,
+                creator,
+                funded,
+                self.crews,
+                max_shared_funder_wallets=cfg.max_shared_funder_wallets,
+                max_crew_earlier_launches=cfg.max_crew_earlier_launches,
+            )
+            self.crews.record(mint, funded)
+            logger.info(
+                f"[gate] {token_info.symbol}: traced {len(wallets)} launch wallets, "
+                f"{len(funded)} funders found, {len(set(funded.values()))} distinct"
+            )
+            return reason
+
+        try:
+            return await asyncio.wait_for(run(), cfg.funder_check_budget)
+        except TimeoutError:
+            logger.warning(f"[gate] {token_info.symbol}: funder check ran out of time")
+            return "funder check timed out" if cfg.require_funder_check else None
 
     async def _dev_pct(self, token_info: TokenInfo) -> float:
         """Creator's share of supply, read from their associated token account.
@@ -362,7 +451,9 @@ class QualityGate:
                     f"[gate] {token_info.symbol}: SOL {sol_start:.2f}->{sol_mid:.2f}->{sol_end:.2f}"
                 )
                 return reason
-            curve_txs = await self._curve_tx_count(pool, started)
+            curve_txs, block = await self._curve_activity(
+                pool, started, getattr(launch, "signature", "") or ""
+            )
             top, top10 = await self._holders(token_info)
             dev_end = await self._dev_pct(token_info)
         except Exception as e:  # noqa: BLE001 - any read failure means "don't buy"
@@ -377,13 +468,23 @@ class QualityGate:
             dev_start,
             dev_end,
             curve_txs=curve_txs,
+            launch_block_buys=block.buys if block else None,
         )
         logger.info(
             f"[gate] {token_info.symbol}: SOL {sol_start:.2f}->{sol_mid:.2f}->{sol_end:.2f}, "
             f"txs {curve_txs if curve_txs is not None else 'n/a'}, "
+            f"launch block {block.buys if block else 'n/a'}, "
             f"top {_pct(top)}, top10 {_pct(top10)}, dev {dev_start:.1%}->{dev_end:.1%}"
         )
         reason = judge_snapshot(snap, self.cfg)
+        if reason is None:
+            try:
+                reason = await self.funding_reason(token_info, block)
+            except Exception as e:  # noqa: BLE001 - a broken trace must not stop trading
+                logger.warning(f"[gate] {token_info.symbol}: funder check failed ({e})")
+                reason = (
+                    "funder check failed" if self.cfg.require_funder_check else None
+                )
         if reason is None:
             self.stats["passed"] += 1
         logger.info(

@@ -48,6 +48,7 @@ class Launch:
     creator: str
     initial_buy_tokens: float
     v_sol: float
+    signature: str = ""  # the create transaction; locates the launch block
 
 
 @dataclass
@@ -211,7 +212,7 @@ class PumpPortalListener(BaseTokenListener):
         self._remember(
             str(mint),
             Launch(str(msg.get("traderPublicKey", "")), _num("initialBuy"),
-                   _num("vSolInBondingCurve")),
+                   _num("vSolInBondingCurve"), str(msg.get("signature") or "")),
         )
         token_info = self._token_info(msg)
         if token_info is None:

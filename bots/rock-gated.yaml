@@ -60,6 +60,15 @@ quality_gate:
   min_sol_growth_second_half: 1.0   # still being bought, not peaked
   min_curve_txs: 25         # at least this many curve transactions in the window (a crowd)
   max_avg_sol_per_tx: 0.5   # skip if a few big wallets did the buying
+  max_launch_block_buys: 2  # 3+ other buys in the create's block = bundled launch, skip (1-2 = snipers, allowed)
+  trace_funders: true       # on coins that pass everything else: who funded the dev and launch-block buyers
+  max_traced_wallets: 6
+  max_shared_funder_wallets: 1     # 2+ launch wallets funded by the same wallet = one person, skip
+  max_crew_earlier_launches: 0     # funder already seen behind an earlier launch = repeat crew, skip
+  funder_check_budget: 4.0  # seconds; if tracing is slower, judge without it
+  require_funder_check: false
+  crew_memory_path: "trades/crews.json"   # on the Fly volume, survives redeploys
+  crew_hub_wallets: 30      # funders topping up this many wallets are services, ignored
   min_unique_buyers: 8      # only with a PumpPortal API key (trade stream)
   max_top_holder_pct: 0.08  # no single wallet (besides the curve) over 8%
   max_top10_holders_pct: 0.30
