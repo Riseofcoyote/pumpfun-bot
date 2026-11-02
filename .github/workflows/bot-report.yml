@@ -1,0 +1,38 @@
+# Manual read-only report on the live Fly bot: machine status, recent Fly logs,
+# the real-trade ledger, paper trades and the gate/trade lines from the bot log.
+# Needs repo secret FLY_API_TOKEN (create with: fly tokens create readonly ... or
+# a deploy token from fly.io/dashboard -> Tokens). Never prints env or secrets.
+name: Bot report
+on: workflow_dispatch
+permissions:
+  contents: read
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+      APP: pumpfun-bot-w1afdq
+    steps:
+      - name: Token present
+        run: '[ -n "$FLY_API_TOKEN" ] || { echo "::error::Secret FLY_API_TOKEN is missing"; exit 1; }'
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - name: Machine status
+        run: flyctl status -a "$APP" || true
+      - name: Recent Fly logs
+        run: timeout 60 flyctl logs -a "$APP" --no-tail | tail -400 || true
+      - name: Files on the volume
+        run: |
+          flyctl ssh console -a "$APP" -C "sh -c 'ls -la /data/trades /data/logs; df -h /data'" || true
+      - name: Real-trade ledger
+        run: |
+          flyctl ssh console -a "$APP" -C "sh -c 'cat /data/trades/ledger.csv 2>/dev/null || echo no ledger yet'" || true
+      - name: Paper trades (last 200)
+        run: |
+          flyctl ssh console -a "$APP" -C "sh -c 'tail -200 /data/trades/paper_trades.csv 2>/dev/null || echo none'" || true
+      - name: Bot log - trades, gate decisions, errors
+        run: |
+          flyctl ssh console -a "$APP" -C "sh -c 'for f in \$(ls -t /data/logs/*.log | head -3); do echo \"=== \$f\"; grep -E \"ledger|gate|paper|Trading wallet|Wallet|Buy|Sell|buy|sell|Skip|skip|ERROR|WARNING|Exception\" \$f | tail -2500; done'" || true
+      - name: Bot log - last 300 lines
+        run: |
+          flyctl ssh console -a "$APP" -C "sh -c 'tail -300 \$(ls -t /data/logs/*.log | head -1)'" || true
