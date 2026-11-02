@@ -11,6 +11,7 @@ import json
 import os
 import sys
 import time
+import urllib.error
 import urllib.request
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -26,12 +27,17 @@ def rpc(method: str, params: list) -> dict | None:
     for attempt in range(4):
         try:
             req = urllib.request.Request(
-                RPC, body.encode(), {"Content-Type": "application/json"}
+                RPC,
+                body.encode(),
+                {"Content-Type": "application/json", "User-Agent": "curl/8.5.0"},
             )
             with urllib.request.urlopen(req, timeout=20) as r:
                 out = json.loads(r.read())
             if "result" in out:
                 return out["result"]
+        except urllib.error.HTTPError as e:
+            detail = e.read()[:200].decode("utf-8", "replace")
+            print(f"  rpc {method} retry {attempt + 1}: HTTP {e.code} {detail}", file=sys.stderr)
         except Exception as e:  # noqa: BLE001
             print(f"  rpc {method} retry {attempt + 1}: {type(e).__name__}", file=sys.stderr)
         time.sleep(1.5 * (attempt + 1))
