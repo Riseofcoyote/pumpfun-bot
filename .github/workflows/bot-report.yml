@@ -1,7 +1,9 @@
-# Manual read-only report on the live Fly bot: machine status, recent Fly logs,
-# the real-trade ledger, paper trades and the gate/trade lines from the bot log.
-# Needs repo secret FLY_API_TOKEN (create with: fly tokens create readonly ... or
-# a deploy token from fly.io/dashboard -> Tokens). Never prints env or secrets.
+# Manual read-only report on the live bot. Moves no funds, changes nothing.
+# 1) On-chain: the bot's trades from the wallet's history, via the existing
+#    SOLANA_NODE_RPC_ENDPOINT secret (bot trades = buys under 0.03 SOL).
+# 2) Optional, if repo secret FLY_API_TOKEN exists: machine status, the trade
+#    ledger and the bot log's gate decisions from the Fly volume.
+# Never prints env or secrets.
 name: Bot report
 on: workflow_dispatch
 permissions:
@@ -9,30 +11,37 @@ permissions:
 jobs:
   report:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     env:
       FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
       APP: pumpfun-bot-w1afdq
     steps:
-      - name: Token present
-        run: '[ -n "$FLY_API_TOKEN" ] || { echo "::error::Secret FLY_API_TOKEN is missing"; exit 1; }'
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Bot trades on-chain
+        env:
+          SOLANA_NODE_RPC_ENDPOINT: ${{ secrets.SOLANA_NODE_RPC_ENDPOINT }}
+          WALLET: Et8w4DyfUkqMebyMj5iv7ugTKfDKjzTDJ2RPDVu8zsRp
+        run: python tools/wallet_trades.py
       - uses: superfly/flyctl-actions/setup-flyctl@master
+        if: env.FLY_API_TOKEN != ''
       - name: Machine status
+        if: env.FLY_API_TOKEN != ''
         run: flyctl status -a "$APP" || true
       - name: Recent Fly logs
+        if: env.FLY_API_TOKEN != ''
         run: timeout 60 flyctl logs -a "$APP" --no-tail | tail -400 || true
-      - name: Files on the volume
-        run: |
-          flyctl ssh console -a "$APP" -C "sh -c 'ls -la /data/trades /data/logs; df -h /data'" || true
       - name: Real-trade ledger
+        if: env.FLY_API_TOKEN != ''
         run: |
           flyctl ssh console -a "$APP" -C "sh -c 'cat /data/trades/ledger.csv 2>/dev/null || echo no ledger yet'" || true
-      - name: Paper trades (last 200)
-        run: |
-          flyctl ssh console -a "$APP" -C "sh -c 'tail -200 /data/trades/paper_trades.csv 2>/dev/null || echo none'" || true
       - name: Bot log - trades, gate decisions, errors
+        if: env.FLY_API_TOKEN != ''
         run: |
           flyctl ssh console -a "$APP" -C "sh -c 'for f in \$(ls -t /data/logs/*.log | head -3); do echo \"=== \$f\"; grep -E \"ledger|gate|paper|Trading wallet|Wallet|Buy|Sell|buy|sell|Skip|skip|ERROR|WARNING|Exception\" \$f | tail -2500; done'" || true
       - name: Bot log - last 300 lines
+        if: env.FLY_API_TOKEN != ''
         run: |
           flyctl ssh console -a "$APP" -C "sh -c 'tail -300 \$(ls -t /data/logs/*.log | head -1)'" || true
