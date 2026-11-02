@@ -45,3 +45,7 @@ jobs:
         if: env.FLY_API_TOKEN != ''
         run: |
           flyctl ssh console -a "$APP" -C "sh -c 'tail -300 \$(ls -t /data/logs/*.log | head -1)'" || true
+      - name: Entry stats per bought coin
+        if: env.FLY_API_TOKEN != ''
+        run: |
+          flyctl ssh console -a "$APP" -C "sh -c 'echo Y2QgL2RhdGEvbG9ncwpscyAtbGEgL2RhdGEvbG9ncyB8IGhlYWQgLTQwCmVjaG8gIj09PSBFTlRSSUVTIgpmb3IgZiBpbiAkKGxzIC10ciAqLmxvZyk7IGRvCmF3ayAtdiBGPSIkZiIgJwovXFtnYXRlXF0gW14gXSs6IFNPTC8geyBzPSQwOyBzdWIoLy4qXFtnYXRlXF0gLywiIixzKTsgc3ltPXM7IHN1YigvOi4qLywiIixzeW0pOyBnW3N5bV09cyB9Ci90cmFjZWQgLiogbGF1bmNoIHdhbGxldHMvIHsgcz0kMDsgc3ViKC8uKlxbZ2F0ZVxdIC8sIiIscyk7IHN5bT1zOyBzdWIoLzouKi8sIiIsc3ltKTsgdFtzeW1dPXMgfQovcGFzc2VkIGFsbCBjaGVja3MgLSBidXlpbmcvIHsgcz0kMDsgc3ViKC8uKlxbZ2F0ZVxdIC8sIiIscyk7IHN5bT1zOyBzdWIoLyBwYXNzZWQuKi8sIiIscyk7IHByaW50IHN1YnN0cigkMCwxLDE5KSAiIHwgIiBnW3NdICIgfCAiIHRbc10gfQovXFtsZWRnZXJcXS8geyBzPSQwOyBzdWIoLy4qXFtsZWRnZXJcXSAvLCIiLHMpOyBwcmludCBzdWJzdHIoJDAsMSwxOSkgIiB8IExFREdFUiAiIHMgfQovXFtnYXRlXF0gcGFzc2VkIFswLTldKyBvZi8geyBsYXN0PSQwIH0KRU5EIHsgcHJpbnQgIj09PSAiIEYgIiAiIGxhc3QgfQonICIkZiIKZG9uZQplY2hvICI9PT0gU0tJUCBSRUFTT05TIChhbGwgbG9ncykiCmNhdCAqLmxvZyB8IGdyZXAgLW8gIlxbZ2F0ZVxdIHNraXAgW146XSo6IFthLXogLV0qIiB8IHNlZCAncy8uKjogLy8nIHwgc29ydCB8IHVuaXEgLWMgfCBzb3J0IC1ybiB8IGhlYWQgLTIwCg== | base64 -d | sh'" || true
