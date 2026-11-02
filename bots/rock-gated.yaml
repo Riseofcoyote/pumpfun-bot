@@ -35,9 +35,12 @@ trade:
 priority_fees:
   enable_dynamic: false
   enable_fixed: true
-  fixed_amount: 100_000     # microlamports per CU; ~0.00001 SOL per tx
+  # Stop-loss sells were filling ~12 points past the -20% trigger (5-7 s to land).
+  # 250k/CU lands faster: ~0.000045 SOL per buy, ~0.00003 per sell (~0.75% of a
+  # 0.01 SOL trade round trip, up from ~0.3%).
+  fixed_amount: 250_000     # microlamports per CU
   extra_percentage: 0.0
-  hard_cap: 200_000
+  hard_cap: 500_000
 
 compute_units: {}
 
