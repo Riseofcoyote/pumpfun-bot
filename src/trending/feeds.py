@@ -23,9 +23,36 @@ UA = "Mozilla/5.0 (compatible; paper-research-bot/1.0)"
 
 # Majors and stables: high volume but not what this engine trades.
 EXCLUDED_SYMBOLS = {
-    "SOL", "WSOL", "USDC", "USDT", "PYUSD", "USDS", "USD1", "JUP", "JTO", "JITOSOL",
-    "MSOL", "BSOL", "INF", "JLP", "WBTC", "CBBTC", "WETH", "ETH", "RAY", "ORCA",
-    "PYTH", "W", "HNT", "RENDER", "EURC", "FDUSD", "USDG", "SSOL", "HSOL", "BNSOL",
+    "SOL",
+    "WSOL",
+    "USDC",
+    "USDT",
+    "PYUSD",
+    "USDS",
+    "USD1",
+    "JUP",
+    "JTO",
+    "JITOSOL",
+    "MSOL",
+    "BSOL",
+    "INF",
+    "JLP",
+    "WBTC",
+    "CBBTC",
+    "WETH",
+    "ETH",
+    "RAY",
+    "ORCA",
+    "PYTH",
+    "W",
+    "HNT",
+    "RENDER",
+    "EURC",
+    "FDUSD",
+    "USDG",
+    "SSOL",
+    "HSOL",
+    "BNSOL",
 }
 SOL_MINT = "So11111111111111111111111111111111111111112"
 
@@ -91,8 +118,8 @@ def _parse_gt_pool(p: dict) -> dict | None:
     if not mint or symbol.upper() in EXCLUDED_SYMBOLS or mint == SOL_MINT:
         return None
     price = _f(a.get("base_token_price_usd"))
-    if price <= 0:
-        return None
+    if price <= 0 or _f(a.get("reserve_in_usd")) < 3_000:
+        return None  # nothing tradeable at any size
     created = a.get("pool_created_at")
     age_h = 9999.0
     if created:
@@ -168,11 +195,30 @@ def discover() -> dict[str, dict]:
     return {r["pool"]: r for r in best.values()}
 
 
-def quotes(pools: list[str]) -> dict[str, dict]:
-    """Latest price and short-window flow per pool from DexScreener.
+JUP = "https://lite-api.jup.ag/price/v3"
+JUP_GATE = RateGate(50)
 
-    Pools DexScreener does not return are absent from the result.
+
+def jup_prices(mints: list[str]) -> dict[str, float]:
+    """USD price per mint from Jupiter's router (route-weighted, near real time)."""
+    out: dict[str, float] = {}
+    for i in range(0, len(mints), 50):
+        doc = get_json(f"{JUP}?ids={','.join(mints[i : i + 50])}", JUP_GATE)
+        for mint, v in (doc or {}).items():
+            px = _f((v or {}).get("usdPrice")) if isinstance(v, dict) else 0.0
+            if px > 0:
+                out[mint] = px
+    return out
+
+
+def quotes(pairs: dict[str, str]) -> dict[str, dict]:
+    """Latest price, liquidity and 5-minute flow per pool.
+
+    ``pairs`` maps pool address -> token mint. Price comes from Jupiter when it
+    has one (``src`` "jup"), else DexScreener ("ds"); liquidity and flow always
+    come from DexScreener. Pools DexScreener does not return are absent.
     """
+    pools = list(pairs)
     out: dict[str, dict] = {}
     for i in range(0, len(pools), 30):
         chunk = pools[i : i + 30]
@@ -188,16 +234,25 @@ def quotes(pools: list[str]) -> dict[str, dict]:
             m5 = (pr.get("txns") or {}).get("m5") or {}
             out[addr] = {
                 "price": price,
+                "src": "ds",
                 "liq": _f((pr.get("liquidity") or {}).get("usd")),
                 "buys_m5": int(_f(m5.get("buys"))),
                 "sells_m5": int(_f(m5.get("sells"))),
             }
+    jp = jup_prices(sorted({pairs[p] for p in out}))
+    for pool, q in out.items():
+        px = jp.get(pairs[pool])
+        # Ignore a router price far off the pool's own; it is a different market.
+        if px and 0.7 < px / q["price"] < 1.43:
+            q["price"], q["src"] = px, "jup"
     return out
 
 
 def sol_usd() -> float | None:
     """SOL price in USD, for sizing paper trades in SOL."""
-    doc = get_json(f"{GT}/simple/networks/solana/token_price/{SOL_MINT}", GT_GATE, GT_HDR)
+    doc = get_json(
+        f"{GT}/simple/networks/solana/token_price/{SOL_MINT}", GT_GATE, GT_HDR
+    )
     try:
         return float(doc["data"]["attributes"]["token_prices"][SOL_MINT])  # type: ignore[index]
     except (TypeError, KeyError, ValueError):

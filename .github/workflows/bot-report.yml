@@ -45,3 +45,11 @@ jobs:
         if: env.FLY_API_TOKEN != ''
         run: |
           flyctl ssh console -a "$APP" -C "sh -c 'tail -300 \$(ls -t /data/logs/*.log | head -1)'" || true
+      - name: Trending paper engine - leaderboard and recent log
+        if: env.FLY_API_TOKEN != ''
+        run: |
+          flyctl ssh console -a "$APP" -C "sh -c 'cat /data/trades/trending/leaderboard.txt; echo === CANDIDATES; cat /data/trades/trending/candidates.json; echo === TRADES; wc -l /data/trades/trending/trades.csv; echo === LOG; grep -E \"WARNING|ERROR|evolve|CANDIDATE|status\" /data/trades/trending/engine.log | tail -80'" || true
+      - name: Trending paper engine - full trade ledger
+        if: env.FLY_API_TOKEN != ''
+        run: |
+          flyctl ssh console -a "$APP" -C "cat /data/trades/trending/trades.csv" || true

@@ -37,9 +37,16 @@ RANGES: dict[str, tuple[float, float, str]] = {
 }
 BOOLS = ("pump_only", "use_trail", "fade_exit")
 LOOSE = {
-    "min_liq": 5_000.0, "max_mcap": 200_000_000.0, "min_age_h": 0.0, "max_age_h": 2_000.0,
-    "h24_min": -0.9, "min_m5_buyers": 0.0, "min_m5_vol": 500.0, "buy_ratio_min": 0.6,
-    "h1_min": -0.30, "h1_max": 5.0,
+    "min_liq": 5_000.0,
+    "max_mcap": 200_000_000.0,
+    "min_age_h": 0.0,
+    "max_age_h": 2_000.0,
+    "h24_min": -0.9,
+    "min_m5_buyers": 0.0,
+    "min_m5_vol": 500.0,
+    "buy_ratio_min": 0.6,
+    "h1_min": -0.30,
+    "h1_max": 5.0,
 }
 
 
@@ -167,7 +174,12 @@ def entry_signal(s: dict, rec: dict, prev_ranks: dict[str, int] | None) -> bool:
         return in_m5 and in_h1
     if fam == "surge":
         base = vol["h1"] / 12 if vol["h1"] > 0 else 0
-        return base > 0 and vol["m5"] >= s["surge_k"] * base and pc["m5"] >= s["m5_min"] and in_h1
+        return (
+            base > 0
+            and vol["m5"] >= s["surge_k"] * base
+            and pc["m5"] >= s["m5_min"]
+            and in_h1
+        )
     if fam == "fresh_trend":
         r = ranks.get("trend5m")
         if r is None or r > s["max_rank"]:
@@ -181,7 +193,9 @@ def entry_signal(s: dict, rec: dict, prev_ranks: dict[str, int] | None) -> bool:
     return False
 
 
-def exit_reason(s: dict, pos: dict, price: float, flow: dict | None, now: float) -> str | None:
+def exit_reason(
+    s: dict, pos: dict, price: float, flow: dict | None, now: float
+) -> str | None:
     """Why ``pos`` should close at ``price`` now, or None to hold.
 
     ``pos`` carries raw (pre-cost) ``entry`` and ``peak`` prices and ``t0``.
@@ -192,7 +206,11 @@ def exit_reason(s: dict, pos: dict, price: float, flow: dict | None, now: float)
         return "take_profit"
     if ret <= -s["sl"]:
         return "stop_loss"
-    if s["use_trail"] and peak_ret >= s["trail_act"] and price <= pos["peak"] * (1 - s["trail_dist"]):
+    if (
+        s["use_trail"]
+        and peak_ret >= s["trail_act"]
+        and price <= pos["peak"] * (1 - s["trail_dist"])
+    ):
         return "trailing"
     held_min = (now - pos["t0"]) / 60
     if held_min >= s["max_hold_min"]:
