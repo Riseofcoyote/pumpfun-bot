@@ -339,11 +339,21 @@ class Engine:
                 if drained or spiked:
                     # Pool pulled: a drained pool's quoted price is not sellable.
                     reason, px = "rug", min(price, p["last"]) * 0.3
+                elif price > 2.5 * p["last"] and p.get("spike_ticks", 0) < 2:
+                    # A 2.5x jump inside one tick is almost always a bad print;
+                    # believe it only once it has held for three ticks.
+                    p["spike_ticks"] = p.get("spike_ticks", 0) + 1
+                    keep.append(p)
+                    continue
                 else:
+                    p["spike_ticks"] = 0
                     p["last"] = price
                     p["peak"] = max(p["peak"], price)
                     reason = exit_reason(s, p, price, fq, now)
                     px = price
+                    if reason == "take_profit":
+                        # Counted as a fill at the target, never at a gap above it.
+                        px = min(price, p["entry"] * (1 + s["tp"]))
             if reason is None:
                 keep.append(p)
                 continue
