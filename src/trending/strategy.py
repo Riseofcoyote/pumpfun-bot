@@ -1,0 +1,231 @@
+"""Strategy genomes for the trending paper engine: entry rules, exits, mutation.
+
+A strategy is a flat dict of parameters (JSON-serializable, so the population
+survives restarts). Fractions throughout: 0.05 means 5%.
+"""
+
+from __future__ import annotations
+
+import random
+import string
+
+FAMILIES = ("momentum", "dip", "surge", "fresh_trend", "volume_leader")
+SOURCES = ("any", "trend5m", "trend1h", "volume")
+
+# name -> (low, high, kind). kind "f" float, "i" int, "log" float sampled in log space.
+RANGES: dict[str, tuple[float, float, str]] = {
+    "min_liq": (5_000, 150_000, "log"),
+    "max_mcap": (200_000, 200_000_000, "log"),
+    "min_age_h": (0, 24, "f"),
+    "max_age_h": (2, 2_000, "log"),
+    "max_rank": (8, 40, "i"),
+    "m5_min": (-0.10, 0.05, "f"),
+    "m5_max": (0.02, 0.50, "f"),
+    "h1_min": (-0.30, 0.40, "f"),
+    "h1_max": (0.05, 5.0, "log"),
+    "h24_min": (-0.9, 1.0, "f"),
+    "buy_ratio_min": (0.6, 1.8, "f"),
+    "min_m5_vol": (500, 60_000, "log"),
+    "min_m5_buyers": (0, 60, "i"),
+    "surge_k": (1.2, 5.0, "f"),
+    "tp": (0.04, 1.0, "log"),
+    "sl": (0.03, 0.35, "log"),
+    "trail_act": (0.02, 0.5, "log"),
+    "trail_dist": (0.015, 0.25, "log"),
+    "max_hold_min": (2, 180, "log"),
+    "cooldown_min": (5, 120, "log"),
+}
+BOOLS = ("pump_only", "use_trail", "fade_exit")
+LOOSE = {
+    "min_liq": 5_000.0, "max_mcap": 200_000_000.0, "min_age_h": 0.0, "max_age_h": 2_000.0,
+    "h24_min": -0.9, "min_m5_buyers": 0.0, "min_m5_vol": 500.0, "buy_ratio_min": 0.6,
+    "h1_min": -0.30, "h1_max": 5.0,
+}
+
+
+def _sample(name: str, rng: random.Random) -> float:
+    lo, hi, kind = RANGES[name]
+    if kind == "log":
+        lo2 = max(lo, 1e-6)
+        import math
+
+        return math.exp(rng.uniform(math.log(lo2), math.log(hi)))
+    if kind == "i":
+        return float(rng.randint(int(lo), int(hi)))
+    return rng.uniform(lo, hi)
+
+
+def new_id(rng: random.Random) -> str:
+    return "".join(rng.choices(string.ascii_lowercase + string.digits, k=6))
+
+
+def random_strategy(rng: random.Random, family: str | None = None) -> dict:
+    s = {n: _sample(n, rng) for n in RANGES}
+    for b in BOOLS:
+        s[b] = rng.random() < 0.5
+    s["family"] = family or rng.choice(FAMILIES)
+    s["source"] = rng.choice(SOURCES)
+    # Ten random filters stacked would almost never all pass, so each optional
+    # one starts switched off (set to its permissive end) half the time.
+    for name, loose in LOOSE.items():
+        if rng.random() < 0.5:
+            s[name] = loose
+    if rng.random() < 0.5:
+        s["source"] = "any"
+    _repair(s)
+    s["id"] = new_id(rng)
+    s["parent"] = None
+    return s
+
+
+def _repair(s: dict) -> None:
+    """Keep ranges coherent after sampling or mutation."""
+    for n, (lo, hi, kind) in RANGES.items():
+        s[n] = min(max(s[n], lo), hi)
+        if kind == "i":
+            s[n] = float(round(s[n]))
+    if s["m5_max"] < s["m5_min"] + 0.01:
+        s["m5_max"] = s["m5_min"] + 0.01
+    if s["h1_max"] < s["h1_min"] + 0.05:
+        s["h1_max"] = s["h1_min"] + 0.05
+    if s["max_age_h"] < s["min_age_h"] + 1:
+        s["max_age_h"] = s["min_age_h"] + 1
+    if s["family"] == "dip":
+        # A dip buy needs an uptrend and a red 5 minutes.
+        s["m5_max"] = min(s["m5_max"], 0.0)
+        s["m5_min"] = min(s["m5_min"], -0.02)
+        s["h1_min"] = max(s["h1_min"], 0.05)
+    if s["use_trail"] and s["trail_act"] > s["tp"]:
+        s["trail_act"] = s["tp"] * 0.6
+
+
+def mutate(parent: dict, rng: random.Random, strength: float = 0.25) -> dict:
+    """Copy of ``parent`` with a few parameters nudged; new id, ``parent`` set."""
+    import math
+
+    s = dict(parent)
+    names = rng.sample(list(RANGES), k=rng.randint(1, 4))
+    for n in names:
+        lo, hi, kind = RANGES[n]
+        if kind == "log":
+            s[n] = math.exp(math.log(max(s[n], 1e-6)) + rng.gauss(0, strength * 1.5))
+        else:
+            s[n] = s[n] + rng.gauss(0, strength * (hi - lo))
+    if rng.random() < 0.15:
+        b = rng.choice(BOOLS)
+        s[b] = not s[b]
+    if rng.random() < 0.08:
+        s["source"] = rng.choice(SOURCES)
+    _repair(s)
+    s["id"] = new_id(rng)
+    s["parent"] = parent["id"]
+    return s
+
+
+def crossover(a: dict, b: dict, rng: random.Random) -> dict:
+    s = {k: (a[k] if rng.random() < 0.5 else b[k]) for k in a}
+    s["family"] = a["family"]
+    _repair(s)
+    s["id"] = new_id(rng)
+    s["parent"] = f"{a['id']}x{b['id']}"
+    return s
+
+
+def is_pump(rec: dict) -> bool:
+    return rec["mint"].endswith("pump") or "pump" in rec["dex"]
+
+
+def entry_signal(s: dict, rec: dict, prev_ranks: dict[str, int] | None) -> bool:
+    """True if ``s`` wants to buy the pool in snapshot record ``rec``.
+
+    ``prev_ranks`` is the record's ranks from the previous snapshot, or None if
+    the pool was not listed then.
+    """
+    if rec["liq"] < s["min_liq"] or rec["mcap"] > s["max_mcap"]:
+        return False
+    if not (s["min_age_h"] <= rec["age_h"] <= s["max_age_h"]):
+        return False
+    if s["pump_only"] and not is_pump(rec):
+        return False
+    ranks = rec["ranks"]
+    if s["source"] != "any":
+        r = ranks.get(s["source"])
+        if r is None or r > s["max_rank"]:
+            return False
+    pc, tx, vol = rec["pc"], rec["tx"]["m5"], rec["vol"]
+    ratio = tx["buys"] / max(tx["sells"], 1)
+    if ratio < s["buy_ratio_min"] or vol["m5"] < s["min_m5_vol"]:
+        return False
+    if tx["buyers"] < s["min_m5_buyers"]:
+        return False
+    if pc["h24"] < s["h24_min"]:
+        return False
+    fam = s["family"]
+    in_m5 = s["m5_min"] <= pc["m5"] <= s["m5_max"]
+    in_h1 = s["h1_min"] <= pc["h1"] <= s["h1_max"]
+    if fam in ("momentum", "dip"):
+        return in_m5 and in_h1
+    if fam == "surge":
+        base = vol["h1"] / 12 if vol["h1"] > 0 else 0
+        return base > 0 and vol["m5"] >= s["surge_k"] * base and pc["m5"] >= s["m5_min"] and in_h1
+    if fam == "fresh_trend":
+        r = ranks.get("trend5m")
+        if r is None or r > s["max_rank"]:
+            return False
+        was = (prev_ranks or {}).get("trend5m")
+        newly = was is None or was > s["max_rank"] or was - r >= 5
+        return newly and pc["m5"] >= s["m5_min"] and in_h1
+    if fam == "volume_leader":
+        r = ranks.get("volume")
+        return r is not None and r <= s["max_rank"] and in_m5 and in_h1
+    return False
+
+
+def exit_reason(s: dict, pos: dict, price: float, flow: dict | None, now: float) -> str | None:
+    """Why ``pos`` should close at ``price`` now, or None to hold.
+
+    ``pos`` carries raw (pre-cost) ``entry`` and ``peak`` prices and ``t0``.
+    """
+    ret = price / pos["entry"] - 1
+    peak_ret = pos["peak"] / pos["entry"] - 1
+    if ret >= s["tp"]:
+        return "take_profit"
+    if ret <= -s["sl"]:
+        return "stop_loss"
+    if s["use_trail"] and peak_ret >= s["trail_act"] and price <= pos["peak"] * (1 - s["trail_dist"]):
+        return "trailing"
+    held_min = (now - pos["t0"]) / 60
+    if held_min >= s["max_hold_min"]:
+        return "max_hold"
+    if (
+        s["fade_exit"]
+        and flow
+        and held_min >= 2
+        and flow["sells_m5"] > flow["buys_m5"] * 1.3
+        and flow["sells_m5"] >= 10
+    ):
+        return "flow_fade"
+    return None
+
+
+def describe(s: dict) -> str:
+    parts = [
+        f"{s['family']}/{s['source']}",
+        f"liq>{s['min_liq'] / 1e3:.0f}k mcap<{s['max_mcap'] / 1e6:.1f}M",
+        f"age {s['min_age_h']:.0f}-{s['max_age_h']:.0f}h",
+        f"m5 {s['m5_min']:+.0%}..{s['m5_max']:+.0%} h1 {s['h1_min']:+.0%}..{s['h1_max']:+.0%}",
+        f"b/s>{s['buy_ratio_min']:.2f} vol5m>{s['min_m5_vol'] / 1e3:.1f}k",
+        f"TP {s['tp']:.0%} SL {s['sl']:.0%}",
+    ]
+    if s["family"] == "surge":
+        parts.append(f"surge x{s['surge_k']:.1f}")
+    if s["source"] != "any" or s["family"] in ("fresh_trend", "volume_leader"):
+        parts.append(f"rank<={s['max_rank']:.0f}")
+    if s["use_trail"]:
+        parts.append(f"trail {s['trail_act']:.0%}/{s['trail_dist']:.0%}")
+    parts.append(f"hold {s['max_hold_min']:.0f}m")
+    if s["fade_exit"]:
+        parts.append("fade-exit")
+    if s["pump_only"]:
+        parts.append("pump-only")
+    return " | ".join(parts)

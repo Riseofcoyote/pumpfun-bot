@@ -1,0 +1,47 @@
+# Runs the trending paper engine for a few minutes against live market data.
+# Moves no funds and uses no secrets.
+name: Trending engine smoke test
+on:
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: "How long to run"
+        default: "5"
+permissions:
+  contents: read
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Probe feeds
+        working-directory: src
+        run: |
+          python - <<'PY'
+          from trending import feeds
+          snap = feeds.discover()
+          print("pools in snapshot:", len(snap))
+          for r in sorted(snap.values(), key=lambda r: min(r["ranks"].values()))[:25]:
+              print(f"{r['symbol']:12} {r['dex']:14} liq ${r['liq']:>11,.0f} mcap ${r['mcap']:>13,.0f} age {r['age_h']:7.1f}h "
+                    f"m5 {r['pc']['m5']:+.1%} h1 {r['pc']['h1']:+.1%} h24 {r['pc']['h24']:+.1%} "
+                    f"vol5m ${r['vol']['m5']:>9,.0f} b/s {r['tx']['m5']['buys']}/{r['tx']['m5']['sells']} ranks {r['ranks']}")
+          q = feeds.quotes(list(snap)[:40])
+          print("dexscreener quotes:", len(q), "of", min(40, len(snap)))
+          for p, v in list(q.items())[:5]:
+              print(p, v, "gt price", snap[p]["price"])
+          print("SOL", feeds.sol_usd())
+          PY
+      - name: Run engine
+        working-directory: src
+        env:
+          TRENDING_DATA_DIR: /tmp/trending
+        run: timeout ${{ inputs.minutes }}m python -m trending.engine || true
+      - name: Results
+        run: |
+          cat /tmp/trending/leaderboard.txt || true
+          echo "=== trades"; cat /tmp/trending/trades.csv 2>/dev/null | cut -c1-200 | head -60
+          echo "=== warnings"; grep -E "WARNING|ERROR|Traceback" /tmp/trending/engine.log | head -40 || true
