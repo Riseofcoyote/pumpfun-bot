@@ -29,10 +29,11 @@ jobs:
               print(f"{r['symbol']:12} {r['dex']:14} liq ${r['liq']:>11,.0f} mcap ${r['mcap']:>13,.0f} age {r['age_h']:7.1f}h "
                     f"m5 {r['pc']['m5']:+.1%} h1 {r['pc']['h1']:+.1%} h24 {r['pc']['h24']:+.1%} "
                     f"vol5m ${r['vol']['m5']:>9,.0f} b/s {r['tx']['m5']['buys']}/{r['tx']['m5']['sells']} ranks {r['ranks']}")
-          q = feeds.quotes(list(snap)[:40])
+          q = feeds.quotes({p: snap[p]["mint"] for p in list(snap)[:40]})
           print("dexscreener quotes:", len(q), "of", min(40, len(snap)))
           for p, v in list(q.items())[:5]:
               print(p, v, "gt price", snap[p]["price"])
+          print("price sources:", {s: sum(v["src"] == s for v in q.values()) for s in ("jup", "ds")})
           print("SOL", feeds.sol_usd())
           PY
       - name: Run engine
