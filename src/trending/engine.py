@@ -35,6 +35,7 @@ from trending.strategy import (
     exit_reason,
     mutate,
     random_strategy,
+    repair,
 )
 
 DATA = Path(os.environ.get("TRENDING_DATA_DIR", "trades/trending"))
@@ -49,6 +50,10 @@ LATENCY_SIDE = 0.004  # price moving between decision and fill, per side
 MIN_TRADES_RANKED = 6
 CANDIDATE_MIN_TRADES = 60
 MIN_PER_FAMILY = 5
+# v2: pools under MIN_POOL_AGE_H are excluded and holds are longer. v1 results
+# came almost entirely from fresh launches, so they are archived, not carried.
+STATE_VERSION = 2
+DRAIN_TICKS = 3  # consecutive drained reads before a pool counts as pulled
 
 logger = logging.getLogger("trending")
 
@@ -101,6 +106,119 @@ def is_candidate(st: dict) -> bool:
         and sum(r[h:]) > 0
     )
 
+
+# Hypotheses from the v1 ledger, restricted to pools 6h+ old: short holds could
+# not beat the ~2% round trip, while the few 50-minute holds on top-volume pools
+# were positive. These test longer holds and wider targets on established pools.
+SEEDS_V2 = [
+    {
+        "family": "volume_leader",
+        "source": "volume",
+        "max_rank": 25,
+        "min_age_h": 24,
+        "m5_min": 0.0,
+        "m5_max": 0.05,
+        "h1_min": 0.0,
+        "h1_max": 0.3,
+        "buy_ratio_min": 1.0,
+        "min_m5_vol": 5_000,
+        "min_liq": 100_000,
+        "tp": 0.15,
+        "sl": 0.10,
+        "use_trail": True,
+        "trail_act": 0.08,
+        "trail_dist": 0.05,
+        "max_hold_min": 90,
+    },
+    {
+        "family": "volume_leader",
+        "source": "volume",
+        "max_rank": 40,
+        "min_age_h": 12,
+        "m5_min": -0.02,
+        "m5_max": 0.04,
+        "h1_min": -0.05,
+        "h1_max": 0.5,
+        "buy_ratio_min": 0.9,
+        "min_m5_vol": 2_000,
+        "min_liq": 60_000,
+        "tp": 0.25,
+        "sl": 0.12,
+        "use_trail": False,
+        "max_hold_min": 180,
+    },
+    {
+        "family": "dip",
+        "source": "any",
+        "min_age_h": 12,
+        "m5_min": -0.08,
+        "m5_max": -0.01,
+        "h1_min": 0.05,
+        "h1_max": 0.6,
+        "buy_ratio_min": 0.8,
+        "min_m5_vol": 3_000,
+        "min_liq": 80_000,
+        "tp": 0.12,
+        "sl": 0.10,
+        "use_trail": False,
+        "max_hold_min": 60,
+    },
+    {
+        "family": "momentum",
+        "source": "trend1h",
+        "max_rank": 20,
+        "min_age_h": 6,
+        "m5_min": 0.0,
+        "m5_max": 0.04,
+        "h1_min": 0.05,
+        "h1_max": 0.4,
+        "buy_ratio_min": 1.1,
+        "min_m5_vol": 5_000,
+        "min_liq": 80_000,
+        "tp": 0.40,
+        "sl": 0.12,
+        "use_trail": True,
+        "trail_act": 0.10,
+        "trail_dist": 0.06,
+        "max_hold_min": 120,
+    },
+    {
+        "family": "fresh_trend",
+        "source": "trend5m",
+        "max_rank": 15,
+        "min_age_h": 24,
+        "m5_min": 0.0,
+        "h1_min": -0.1,
+        "h1_max": 1.0,
+        "buy_ratio_min": 1.0,
+        "min_m5_vol": 5_000,
+        "min_liq": 80_000,
+        "tp": 0.30,
+        "sl": 0.12,
+        "use_trail": True,
+        "trail_act": 0.12,
+        "trail_dist": 0.07,
+        "max_hold_min": 90,
+    },
+    {
+        "family": "surge",
+        "source": "any",
+        "surge_k": 2.0,
+        "min_age_h": 24,
+        "m5_min": 0.0,
+        "h1_min": -0.05,
+        "h1_max": 0.6,
+        "buy_ratio_min": 1.1,
+        "min_m5_vol": 10_000,
+        "min_liq": 100_000,
+        "tp": 0.20,
+        "sl": 0.10,
+        "use_trail": True,
+        "trail_act": 0.08,
+        "trail_dist": 0.05,
+        "max_hold_min": 60,
+    },
+]
 
 SEEDS = [
     # Hand-built starting points, one or more per family; evolution takes over.
@@ -225,12 +343,14 @@ class Engine:
         self.sol_usd = 150.0
         self.started = now_iso()
         self.totals = {"opened": 0, "closed": 0, "snapshots": 0}
+        self.version = STATE_VERSION
 
     # ---------- population ----------
     def seed(self) -> None:
-        for spec in SEEDS:
+        for spec in SEEDS + SEEDS_V2:
             s = random_strategy(self.rng, spec["family"])
             s.update(spec)
+            repair(s)
             self.strategies.append(self._wrap(s))
         fams = list(FAMILIES)
         while len(self.strategies) < POP:
@@ -334,8 +454,15 @@ class Engine:
             else:
                 p["missing_since"] = None
                 price = fq["price"]
-                drained = fq["liq"] < 0.3 * p["liq0"]
-                spiked = price > 3 * p["last"] and fq["liq"] < 0.5 * p["liq0"]
+                # A zero is a missing field, not an empty pool. A drained read
+                # with the price intact must persist before it counts: real
+                # pulls stay pulled, a one-off bad liquidity print does not.
+                low = 0 < fq["liq"] < 0.3 * p["liq0"]
+                p["drain_ticks"] = p.get("drain_ticks", 0) + 1 if low else 0
+                drained = low and (
+                    p["drain_ticks"] >= DRAIN_TICKS or price < 0.5 * p["last"]
+                )
+                spiked = price > 3 * p["last"] and 0 < fq["liq"] < 0.5 * p["liq0"]
                 if drained or spiked:
                     # Pool pulled: a drained pool's quoted price is not sellable.
                     reason, px = "rug", min(price, p["last"]) * 0.3
@@ -590,6 +717,7 @@ class Engine:
                 "sol_usd",
                 "started",
                 "totals",
+                "version",
             )
         }
         tmp = DATA / "state.json.tmp"
@@ -609,9 +737,42 @@ class Engine:
             return False
         for k, v in state.items():
             setattr(self, k, v)
+        if state.get("version", 1) < STATE_VERSION:
+            self._migrate(state.get("version", 1))
         now = time.time()
         self.cooldown = {k: v for k, v in self.cooldown.items() if v > now}
         return True
+
+    def _migrate(self, old: int) -> None:
+        """Bring v1 state to v2: archive results, keep and repair the genomes."""
+        old_csv = DATA / "trades.csv"
+        if old_csv.exists():
+            old_csv.replace(DATA / f"trades_v{old}.csv")
+        self.retired = []
+        self.candidates = {}
+        self.positions = []
+        self.cooldown = {}
+        self.totals = {"opened": 0, "closed": 0, "snapshots": 0}
+        self.started = now_iso()
+        ranked = sorted(self.strategies, key=lambda s: score(s["stats"]))
+        replace = {s["id"] for s in ranked[: len(SEEDS_V2)]}
+        keep = [s for s in self.strategies if s["id"] not in replace]
+        self.strategies = []
+        for s in keep:
+            s.pop("stats", None)
+            repair(s)
+            self.strategies.append(self._wrap(s))
+        for spec in SEEDS_V2:
+            s = random_strategy(self.rng, spec["family"])
+            s.update(spec)
+            repair(s)
+            self.strategies.append(self._wrap(s))
+        self.last_evolve = time.time()
+        self.version = STATE_VERSION
+        logger.warning(
+            f"[migrate] state v{old} -> v{STATE_VERSION}: results archived to "
+            f"trades_v{old}.csv, stats reset, {len(SEEDS_V2)} new seeds"
+        )
 
 
 def main() -> None:

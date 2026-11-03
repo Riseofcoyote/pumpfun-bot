@@ -11,13 +11,16 @@ import string
 
 FAMILIES = ("momentum", "dip", "surge", "fresh_trend", "volume_leader")
 SOURCES = ("any", "trend5m", "trend1h", "volume")
+# Pools younger than this are fresh launches, not the established trending and
+# top-volume tokens this engine is for; no strategy may buy them.
+MIN_POOL_AGE_H = 6.0
 
 # name -> (low, high, kind). kind "f" float, "i" int, "log" float sampled in log space.
 RANGES: dict[str, tuple[float, float, str]] = {
     "min_liq": (5_000, 150_000, "log"),
     "max_mcap": (200_000, 200_000_000, "log"),
-    "min_age_h": (0, 24, "f"),
-    "max_age_h": (2, 2_000, "log"),
+    "min_age_h": (6, 72, "f"),
+    "max_age_h": (24, 5_000, "log"),
     "max_rank": (8, 40, "i"),
     "m5_min": (-0.10, 0.05, "f"),
     "m5_max": (0.02, 0.50, "f"),
@@ -28,19 +31,19 @@ RANGES: dict[str, tuple[float, float, str]] = {
     "min_m5_vol": (500, 60_000, "log"),
     "min_m5_buyers": (0, 60, "i"),
     "surge_k": (1.2, 5.0, "f"),
-    "tp": (0.04, 1.0, "log"),
-    "sl": (0.03, 0.35, "log"),
-    "trail_act": (0.02, 0.5, "log"),
+    "tp": (0.06, 1.0, "log"),
+    "sl": (0.05, 0.35, "log"),
+    "trail_act": (0.03, 0.5, "log"),
     "trail_dist": (0.015, 0.25, "log"),
-    "max_hold_min": (2, 180, "log"),
+    "max_hold_min": (10, 360, "log"),
     "cooldown_min": (5, 120, "log"),
 }
 BOOLS = ("pump_only", "use_trail", "fade_exit")
 LOOSE = {
     "min_liq": 5_000.0,
     "max_mcap": 200_000_000.0,
-    "min_age_h": 0.0,
-    "max_age_h": 2_000.0,
+    "min_age_h": 6.0,
+    "max_age_h": 5_000.0,
     "h24_min": -0.9,
     "min_m5_buyers": 0.0,
     "min_m5_vol": 500.0,
@@ -106,6 +109,9 @@ def _repair(s: dict) -> None:
         s["trail_act"] = s["tp"] * 0.6
 
 
+repair = _repair
+
+
 def mutate(parent: dict, rng: random.Random, strength: float = 0.25) -> dict:
     """Copy of ``parent`` with a few parameters nudged; new id, ``parent`` set."""
     import math
@@ -148,6 +154,8 @@ def entry_signal(s: dict, rec: dict, prev_ranks: dict[str, int] | None) -> bool:
     ``prev_ranks`` is the record's ranks from the previous snapshot, or None if
     the pool was not listed then.
     """
+    if rec["age_h"] < MIN_POOL_AGE_H:
+        return False
     if rec["liq"] < s["min_liq"] or rec["mcap"] > s["max_mcap"]:
         return False
     if not (s["min_age_h"] <= rec["age_h"] <= s["max_age_h"]):
