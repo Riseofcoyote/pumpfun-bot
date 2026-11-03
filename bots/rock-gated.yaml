@@ -54,7 +54,7 @@ filters:
 
 quality_gate:
   enabled: true
-  dry_run: false            # LIVE: trades real SOL. Set true for paper mode.
+  dry_run: true             # PAPER: no real SOL is spent. false = live trading.
   observe_seconds: 30       # watch window before deciding
   max_concurrent_watches: 3 # coins watched at once (one position at a time); ~2 RPC calls per coin
   min_sol_raised: 4.0       # real SOL bought into the curve by end of window

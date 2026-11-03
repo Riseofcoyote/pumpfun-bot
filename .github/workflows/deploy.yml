@@ -1,0 +1,17 @@
+# Manual deploy of main to the Fly bot app. Needs repo secret FLY_API_TOKEN.
+name: Deploy to Fly
+on: workflow_dispatch
+permissions:
+  contents: read
+concurrency: deploy
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - run: flyctl deploy --remote-only --app pumpfun-bot-w1afdq
+      - run: flyctl status --app pumpfun-bot-w1afdq
