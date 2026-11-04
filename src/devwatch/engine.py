@@ -351,6 +351,7 @@ class DevWatch:
         self.seen_sigs: set[str] = set()
         self.tx_queue: asyncio.Queue = asyncio.Queue(maxsize=500)
         self.open: list[Path_] = []
+        self.tasks: set[asyncio.Task] = set()
         self.done: list[dict] = []
         self.stats = Counter()
         self.last_control = 0.0
@@ -593,6 +594,19 @@ class DevWatch:
                 self.linked = {k: v for k, v in self.linked.items() if v["at"] > cutoff}
             await asyncio.sleep(0.3)
 
+    def spawn(self, coro) -> None:  # noqa: ANN001
+        """Run a tracking task; the event loop keeps only weak references, so hold one."""
+        task = asyncio.create_task(coro)
+        self.tasks.add(task)
+
+        def done(t: asyncio.Task) -> None:
+            self.tasks.discard(t)
+            if not t.cancelled() and t.exception():
+                self.stats["track_errors"] += 1
+                logger.error("[track] failed", exc_info=t.exception())
+
+        task.add_done_callback(done)
+
     # ----- launches
     def classify(self, creator: str) -> tuple[str, dict] | None:
         if creator in self.hubs:
@@ -645,10 +659,10 @@ class DevWatch:
                             logger.warning(
                                 f"[signal] {kind} {meta['symbol']} {meta['mint']} by {creator[:8]} {extra}"
                             )
-                            asyncio.create_task(self.track(kind, meta | extra))
+                            self.spawn(self.track(kind, meta | extra))
                         elif time.time() - self.last_control >= CONTROL_EVERY:
                             self.last_control = time.time()
-                            asyncio.create_task(self.track("control", meta))
+                            self.spawn(self.track("control", meta))
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"[pumpportal] {type(e).__name__} {e}; reconnecting")
             await asyncio.sleep(3)
