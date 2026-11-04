@@ -26,7 +26,8 @@ RANGES: dict[str, tuple[float, float, str]] = {
     "m5_max": (0.02, 0.50, "f"),
     "h1_min": (-0.30, 0.40, "f"),
     "h1_max": (0.05, 5.0, "log"),
-    "h24_min": (-0.9, 1.0, "f"),
+    "h6_min": (-0.5, 2.0, "f"),
+    "h24_min": (-0.9, 3.0, "f"),
     "buy_ratio_min": (0.6, 1.8, "f"),
     "min_m5_vol": (500, 60_000, "log"),
     "min_m5_buyers": (0, 60, "i"),
@@ -35,7 +36,8 @@ RANGES: dict[str, tuple[float, float, str]] = {
     "sl": (0.05, 0.35, "log"),
     "trail_act": (0.03, 0.5, "log"),
     "trail_dist": (0.015, 0.25, "log"),
-    "max_hold_min": (10, 360, "log"),
+    # Under ~20 minutes the typical move does not cover the ~2% round trip.
+    "max_hold_min": (20, 360, "log"),
     "cooldown_min": (5, 120, "log"),
 }
 BOOLS = ("pump_only", "use_trail", "fade_exit")
@@ -44,6 +46,7 @@ LOOSE = {
     "max_mcap": 200_000_000.0,
     "min_age_h": 6.0,
     "max_age_h": 5_000.0,
+    "h6_min": -0.5,
     "h24_min": -0.9,
     "min_m5_buyers": 0.0,
     "min_m5_vol": 500.0,
@@ -94,12 +97,9 @@ def _repair(s: dict) -> None:
         s[n] = min(max(s[n], lo), hi)
         if kind == "i":
             s[n] = float(round(s[n]))
-    if s["m5_max"] < s["m5_min"] + 0.01:
-        s["m5_max"] = s["m5_min"] + 0.01
-    if s["h1_max"] < s["h1_min"] + 0.05:
-        s["h1_max"] = s["h1_min"] + 0.05
-    if s["max_age_h"] < s["min_age_h"] + 1:
-        s["max_age_h"] = s["min_age_h"] + 1
+    s["m5_max"] = max(s["m5_max"], s["m5_min"] + 0.01)
+    s["h1_max"] = max(s["h1_max"], s["h1_min"] + 0.05)
+    s["max_age_h"] = max(s["max_age_h"], s["min_age_h"] + 1)
     if s["family"] == "dip":
         # A dip buy needs an uptrend and a red 5 minutes.
         s["m5_max"] = min(s["m5_max"], 0.0)
@@ -173,7 +173,7 @@ def entry_signal(s: dict, rec: dict, prev_ranks: dict[str, int] | None) -> bool:
         return False
     if tx["buyers"] < s["min_m5_buyers"]:
         return False
-    if pc["h24"] < s["h24_min"]:
+    if pc["h24"] < s["h24_min"] or pc.get("h6", 0.0) < s.get("h6_min", -0.5):
         return False
     fam = s["family"]
     in_m5 = s["m5_min"] <= pc["m5"] <= s["m5_max"]
@@ -240,6 +240,7 @@ def describe(s: dict) -> str:
         f"liq>{s['min_liq'] / 1e3:.0f}k mcap<{s['max_mcap'] / 1e6:.1f}M",
         f"age {s['min_age_h']:.0f}-{s['max_age_h']:.0f}h",
         f"m5 {s['m5_min']:+.0%}..{s['m5_max']:+.0%} h1 {s['h1_min']:+.0%}..{s['h1_max']:+.0%}",
+        f"h6>{s.get('h6_min', -0.5):+.0%} h24>{s['h24_min']:+.0%}",
         f"b/s>{s['buy_ratio_min']:.2f} vol5m>{s['min_m5_vol'] / 1e3:.1f}k",
         f"TP {s['tp']:.0%} SL {s['sl']:.0%}",
     ]

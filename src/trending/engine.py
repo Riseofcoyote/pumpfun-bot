@@ -29,6 +29,8 @@ from pathlib import Path
 from trending import feeds
 from trending.strategy import (
     FAMILIES,
+    LOOSE,
+    RANGES,
     crossover,
     describe,
     entry_signal,
@@ -50,6 +52,10 @@ LATENCY_SIDE = 0.004  # price moving between decision and fill, per side
 MIN_TRADES_RANKED = 6
 CANDIDATE_MIN_TRADES = 60
 MIN_PER_FAMILY = 5
+# A candidate must spread its trades: riding one or two tokens that happened to
+# trend all day is market beta, not a rule that transfers.
+CANDIDATE_MIN_TOKENS = 15
+CANDIDATE_MAX_TOKEN_SHARE = 0.25
 # v2: pools under MIN_POOL_AGE_H are excluded and holds are longer. v1 results
 # came almost entirely from fresh launches, so they are archived, not carried.
 STATE_VERSION = 2
@@ -81,6 +87,7 @@ def new_stats() -> dict:
         "gl": 0.0,
         "rets": [],
         "exits": {},
+        "mints": {},
     }
 
 
@@ -99,6 +106,11 @@ def is_candidate(st: dict) -> bool:
     if st["n"] < CANDIDATE_MIN_TRADES or len(r) < CANDIDATE_MIN_TRADES:
         return False
     h = len(r) // 2
+    mints = st.get("mints") or {}
+    if len(mints) < CANDIDATE_MIN_TOKENS:
+        return False
+    if max(mints.values()) > CANDIDATE_MAX_TOKEN_SHARE * sum(mints.values()):
+        return False
     return (
         st["sum"] / st["n"] > 0.005
         and profit_factor(st) > 1.25
@@ -216,6 +228,81 @@ SEEDS_V2 = [
         "use_trail": True,
         "trail_act": 0.08,
         "trail_dist": 0.05,
+        "max_hold_min": 60,
+    },
+]
+
+# v3 hypotheses. In the first v2 hours the only positive results came from
+# ~50-minute holds on top-5 volume pools already up strongly on the day; the
+# engine also showed holds under 20 minutes cannot cover the round trip. These
+# test whether "established, strongly trending on h6/h24, hold about an hour"
+# generalizes beyond the two tokens it was seen on.
+SEEDS_V3 = [
+    {
+        "family": "volume_leader",
+        "source": "volume",
+        "max_rank": 5,
+        "min_age_h": 12,
+        "max_age_h": 5_000,
+        "m5_min": -0.03,
+        "m5_max": 0.05,
+        "h1_min": -0.05,
+        "h1_max": 0.3,
+        "h6_min": 0.2,
+        "h24_min": 1.0,
+        "buy_ratio_min": 0.6,
+        "min_m5_vol": 2_000,
+        "min_liq": 100_000,
+        "max_mcap": 200_000_000,
+        "tp": 0.25,
+        "sl": 0.15,
+        "use_trail": False,
+        "fade_exit": False,
+        "max_hold_min": 55,
+    },
+    {
+        "family": "volume_leader",
+        "source": "volume",
+        "max_rank": 12,
+        "min_age_h": 12,
+        "max_age_h": 5_000,
+        "m5_min": -0.03,
+        "m5_max": 0.05,
+        "h1_min": -0.05,
+        "h1_max": 0.3,
+        "h6_min": 0.1,
+        "h24_min": 0.3,
+        "buy_ratio_min": 0.6,
+        "min_m5_vol": 2_000,
+        "min_liq": 80_000,
+        "max_mcap": 200_000_000,
+        "tp": 0.30,
+        "sl": 0.15,
+        "use_trail": True,
+        "trail_act": 0.08,
+        "trail_dist": 0.05,
+        "fade_exit": False,
+        "max_hold_min": 90,
+    },
+    {
+        "family": "momentum",
+        "source": "any",
+        "min_age_h": 12,
+        "max_age_h": 5_000,
+        "m5_min": -0.02,
+        "m5_max": 0.03,
+        "h1_min": 0.03,
+        "h1_max": 0.25,
+        "h6_min": 0.15,
+        "h24_min": 0.5,
+        "buy_ratio_min": 0.8,
+        "min_m5_vol": 2_000,
+        "min_liq": 100_000,
+        "max_mcap": 200_000_000,
+        "tp": 0.20,
+        "sl": 0.12,
+        "use_trail": False,
+        "fade_exit": False,
         "max_hold_min": 60,
     },
 ]
@@ -344,10 +431,12 @@ class Engine:
         self.started = now_iso()
         self.totals = {"opened": 0, "closed": 0, "snapshots": 0}
         self.version = STATE_VERSION
+        self.injected: list[str] = []
 
     # ---------- population ----------
     def seed(self) -> None:
-        for spec in SEEDS + SEEDS_V2:
+        self.injected = ["v3"]
+        for spec in SEEDS + SEEDS_V2 + SEEDS_V3:
             s = random_strategy(self.rng, spec["family"])
             s.update(spec)
             repair(s)
@@ -420,7 +509,13 @@ class Engine:
                     "ctx": {
                         "m5": rec["pc"]["m5"],
                         "h1": rec["pc"]["h1"],
+                        "h6": rec["pc"].get("h6"),
                         "h24": rec["pc"]["h24"],
+                        "bs5": round(
+                            rec["tx"]["m5"]["buys"]
+                            / max(rec["tx"]["m5"]["sells"], 1),
+                            2,
+                        ),
                         "liq": round(liq),
                         "mcap": round(rec["mcap"]),
                         "age_h": round(rec["age_h"], 1),
@@ -502,6 +597,8 @@ class Engine:
             st["gw" if net > 0 else "gl"] += abs(net)
             st["rets"] = ([*st["rets"], round(net, 5)])[-400:]
             st["exits"][reason] = st["exits"].get(reason, 0) + 1
+            mints = st.setdefault("mints", {})
+            mints[p["mint"]] = mints.get(p["mint"], 0) + 1
             self.cooldown[f"{s['id']}:{p['mint']}"] = now + s["cooldown_min"] * 60
             if is_candidate(st) and s["id"] not in self.candidates:
                 self.candidates[s["id"]] = {
@@ -578,7 +675,8 @@ class Engine:
             ranked[len(ranked) - int(len(ranked) * 0.35) :] if len(ranked) >= 4 else []
         )
         cut = [s for s in cut if s["id"] not in self.candidates]
-        drop = {s["id"] for s in cut + idle}
+        clones = self._clones(mature)
+        drop = {s["id"] for s in cut + idle + clones}
         if not drop:
             self.last_evolve = now
             return
@@ -624,9 +722,27 @@ class Engine:
         self.last_evolve = now
         logger.warning(
             f"[evolve] generation {self.generation}: replaced {len(drop)} "
-            f"({len(cut)} weak, {len(idle)} idle); best: "
+            f"({len(cut)} weak, {len(idle)} idle, {len(clones)} clones); best: "
             f"{self._line(ranked[0]) if ranked else 'n/a'}"
         )
+
+    def _clones(self, pool: list[dict]) -> list[dict]:
+        """Strategies whose trade record duplicates an older one's.
+
+        Mutating a parameter that never binds yields a copy that takes the same
+        trades; copies waste population and make one result look like many.
+        """
+        seen: set[tuple] = set()
+        out = []
+        for s in sorted(pool, key=lambda s: s["born"]):
+            r = s["stats"]["rets"]
+            if len(r) < MIN_TRADES_RANKED:
+                continue
+            key = (s["family"], tuple(r))
+            if key in seen and s["id"] not in self.candidates:
+                out.append(s)
+            seen.add(key)
+        return out
 
     def _tournament(self, pool: list[dict]) -> dict:
         picks = self.rng.sample(pool, min(3, len(pool)))
@@ -652,7 +768,8 @@ class Engine:
         return (
             f"{s['id']} g{s['gen']} n={st['n']} win {st['wins'] / st['n']:.0%} "
             f"avg {st['sum'] / st['n']:+.2%} PF {profit_factor(st):.2f} "
-            f"total {st['sum'] * SIZE_SOL:+.4f} SOL | {describe(s)}"
+            f"total {st['sum'] * SIZE_SOL:+.4f} SOL "
+            f"tokens {len(st.get('mints') or {})} | {describe(s)}"
         )
 
     def report(self) -> str:
@@ -718,6 +835,7 @@ class Engine:
                 "started",
                 "totals",
                 "version",
+                "injected",
             )
         }
         tmp = DATA / "state.json.tmp"
@@ -739,9 +857,41 @@ class Engine:
             setattr(self, k, v)
         if state.get("version", 1) < STATE_VERSION:
             self._migrate(state.get("version", 1))
+        for s in self.strategies:
+            for name in RANGES:
+                s.setdefault(name, LOOSE.get(name, RANGES[name][0]))
+            s["stats"].setdefault("mints", {})
+        if "v3" not in self.injected:
+            self._inject("v3", SEEDS_V3)
         now = time.time()
         self.cooldown = {k: v for k, v in self.cooldown.items() if v > now}
         return True
+
+    def _inject(self, tag: str, specs: list[dict]) -> None:
+        """Add hand-built strategies once, replacing clones, then the weakest."""
+        clones = {s["id"] for s in self._clones(self.strategies)}
+        ranked = sorted(
+            self.strategies,
+            key=lambda s: (s["id"] not in clones, score(s["stats"])),
+        )
+        drop = {
+            s["id"] for s in ranked[: len(specs)] if s["id"] not in self.candidates
+        }
+        for s in self.strategies:
+            if s["id"] in drop:
+                self.retired.append(self._public(s) | {"retired": now_iso()})
+        self.strategies = [s for s in self.strategies if s["id"] not in drop]
+        open_ids = {p["sid"] for p in self.positions}
+        for spec in specs:
+            s = random_strategy(self.rng, spec["family"])
+            s.update(spec)
+            repair(s)
+            self.strategies.append(self._wrap(s))
+        self.injected.append(tag)
+        logger.warning(
+            f"[inject] {tag}: added {len(specs)} seeds, retired {len(drop)} "
+            f"({len(drop & clones)} clones, {len(drop & open_ids)} with open positions)"
+        )
 
     def _migrate(self, old: int) -> None:
         """Bring v1 state to v2: archive results, keep and repair the genomes."""
