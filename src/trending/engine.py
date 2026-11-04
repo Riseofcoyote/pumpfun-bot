@@ -31,6 +31,7 @@ from trending.strategy import (
     FAMILIES,
     LOOSE,
     RANGES,
+    SEARCH_FAMILIES,
     crossover,
     describe,
     entry_signal,
@@ -603,7 +604,7 @@ class Engine:
             s.update(spec)
             repair(s)
             self.strategies.append(self._wrap(s))
-        fams = list(FAMILIES)
+        fams = list(SEARCH_FAMILIES)
         while len(self.strategies) < POP:
             fam = fams[len(self.strategies) % len(fams)]
             self.strategies.append(self._wrap(random_strategy(self.rng, fam)))
@@ -852,9 +853,9 @@ class Engine:
                 self.retired.append(self._public(s) | {"retired": now_iso()})
         self.retired = self.retired[-500:]
         self.strategies = [s for s in self.strategies if s["id"] not in drop]
-        # Keep every family in the search, so an early lucky streak in one
+        # Keep every searched family alive, so an early lucky streak in one
         # family cannot crowd out the others before they have been tested.
-        for fam in FAMILIES:
+        for fam in SEARCH_FAMILIES:
             members = [s for s in self.strategies if s["family"] == fam]
             best = [s for s in ranked if s["family"] == fam and s["id"] not in drop]
             while len(members) < MIN_PER_FAMILY and len(self.strategies) < POP:

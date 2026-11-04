@@ -10,6 +10,11 @@ import random
 import string
 
 FAMILIES = ("momentum", "dip", "surge", "fresh_trend", "volume_leader")
+# Families new random strategies and the per-family quota draw from. fresh_trend
+# (buying a pool as it enters the 5-minute list) lost after costs under every
+# engine version and on the average token, so it gets no new seeds or quota;
+# live members stay until evolution cuts them, and an elite one may still breed.
+SEARCH_FAMILIES = ("momentum", "dip", "surge", "volume_leader")
 SOURCES = ("any", "trend5m", "trend1h", "volume")
 # Pools younger than this are fresh launches, not the established trending and
 # top-volume tokens this engine is for; no strategy may buy them.
@@ -89,7 +94,7 @@ def random_strategy(rng: random.Random, family: str | None = None) -> dict:
     # Flow-fade exits cut positions after a few minutes at about 0% gross, so
     # they mostly pay the round trip; keep the gene but start it rarer.
     s["fade_exit"] = rng.random() < 0.2
-    s["family"] = family or rng.choice(FAMILIES)
+    s["family"] = family or rng.choice(SEARCH_FAMILIES)
     s["source"] = rng.choice(SOURCES)
     # Ten random filters stacked would almost never all pass, so each optional
     # one starts switched off (set to its permissive end) half the time.

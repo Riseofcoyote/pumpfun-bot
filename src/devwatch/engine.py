@@ -66,6 +66,9 @@ MAX_FUNDERS = 100
 LINK_DAYS = 7
 MIN_LINK_SOL = 0.05
 HUB_TRANSFERS_PER_DAY = 25
+# Creators of coins seen graduating live (PumpPortal migration stream), kept for
+# same-wallet matching; the oldest are dropped past this many.
+MAX_GRAD_CREATORS = 5000
 
 # Exit rules scored on every price path: (name, take profit, stop loss, trail
 # activate, trail distance, max hold seconds). Multiples are of the stake.
@@ -390,17 +393,24 @@ class DevWatch:
 
     # ----- watchlist
     def watched(self) -> dict[str, str]:
-        """Wallets to follow on chain -> 'creator' or 'funder'."""
+        """Wallets to follow on chain -> 'creator' or 'funder'.
+
+        Top-coin creators come first by mcap; graduate creators (mcap 0) fill the
+        remaining slots, newest first.
+        """
         cs = sorted(
             (c for c in self.creators if c not in self.hubs),
-            key=lambda c: -self.creators[c]["best_mcap"],
+            key=lambda c: (
+                -self.creators[c]["best_mcap"],
+                -self.creators[c].get("added", 0),
+            ),
         )[:MAX_CREATORS]
         fs = sorted(
             (f for f in self.funders if f not in self.hubs),
             key=lambda f: -len(self.funders[f]["creators"]),
         )[:MAX_FUNDERS]
-        out = {f: "funder" for f in fs}
-        out.update({c: "creator" for c in cs})
+        out = dict.fromkeys(fs, "funder")
+        out.update(dict.fromkeys(cs, "creator"))
         return out
 
     async def refresh_watchlist(self) -> None:
@@ -435,6 +445,11 @@ class DevWatch:
                 if coin["creator"] in self.creators:
                     c = self.creators[coin["creator"]]
                     c["best_mcap"] = max(c["best_mcap"], coin["mcap"])
+                    if c.get("src") == "grad":
+                        c["src"] = "top"
+                        if c["funder"] == "":
+                            c["funder"] = None
+                            new_creators.append(coin["creator"])
                 continue
             creator = await self.creator_of(rec["mint"], rec["pool"])
             if not creator or creator in EXCHANGES:
@@ -452,6 +467,9 @@ class DevWatch:
             )
             c["coins"].append(rec["mint"])
             c["best_mcap"] = max(c["best_mcap"], rec["mcap"])
+            if c.get("src") == "grad" and c["funder"] == "":
+                c["funder"] = None  # graduates are not traced; top creators are
+            c["src"] = "top"
             if len(c["coins"]) > 8:
                 self.hubs.add(creator)  # a program/fee address, not a person
             if c["funder"] is None:
@@ -480,8 +498,43 @@ class DevWatch:
         cur = decode_curve(data) if data else None
         if cur and cur["creator"] != DEFAULT_KEY:
             return cur["creator"]
+        if not pool:
+            return None
         data = await self.rpc.account(pool)
         return pool_coin_creator(data) if data else None
+
+    async def add_graduate(self, mint: str, pool: str) -> None:
+        """Remember the creator of a coin that just graduated off its curve."""
+        if not mint or mint in self.coins:
+            return
+        creator = await self.creator_of(mint, pool)
+        if not creator or creator in EXCHANGES or creator in self.hubs:
+            self.stats["grad_no_creator"] += 1
+            return
+        self.coins[mint] = {
+            "symbol": "",
+            "pool": pool,
+            "creator": creator,
+            "mcap": 0,
+            "seen": now_iso(),
+            "src": "grad",
+        }
+        c = self.creators.setdefault(
+            creator,
+            {"coins": [], "best_mcap": 0, "funder": "", "src": "grad"},
+        )
+        c["coins"].append(mint)
+        c.setdefault("added", time.time())
+        if len(c["coins"]) > 8:
+            self.hubs.add(creator)
+        self.stats["graduates"] += 1
+        logger.info(f"[grad] {mint} creator {creator[:8]} ({len(c['coins'])} coins)")
+        grads = [k for k, v in self.creators.items() if v.get("src") == "grad"]
+        if len(grads) > MAX_GRAD_CREATORS:
+            grads.sort(key=lambda k: self.creators[k].get("added", 0))
+            for k in grads[: len(grads) - MAX_GRAD_CREATORS]:
+                for m in self.creators.pop(k)["coins"]:
+                    self.coins.pop(m, None)
 
     async def trace_funder(self, wallet: str) -> str | None:
         """The wallet that sent ``wallet`` its first real SOL, from its oldest txs."""
@@ -613,18 +666,21 @@ class DevWatch:
             return None
         if creator in self.creators:
             c = self.creators[creator]
-            return "same_dev", {"source_mcap": c["best_mcap"], "via": creator}
+            kind = "grad_dev" if c.get("src") == "grad" else "same_dev"
+            return kind, {"source_mcap": c["best_mcap"], "via": creator}
         if creator in self.funders:
             return "funder_launch", {"via": creator}
         link = self.linked.get(creator)
         if link and link["at"] > time.time() - LINK_DAYS * 86400:
             via = link["via"]
-            mcap = self.creators.get(via, {}).get("best_mcap", 0)
-            kind = (
-                "dev_new_wallet"
-                if link["via_kind"] == "creator"
-                else "funder_new_wallet"
-            )
+            vc = self.creators.get(via, {})
+            mcap = vc.get("best_mcap", 0)
+            if link["via_kind"] != "creator":
+                kind = "funder_new_wallet"
+            elif vc.get("src") == "grad":
+                kind = "grad_dev_new_wallet"
+            else:
+                kind = "dev_new_wallet"
             return kind, {"via": via, "source_mcap": mcap, "link_sol": link["sol"]}
         return None
 
@@ -633,13 +689,27 @@ class DevWatch:
             try:
                 async with websockets.connect(PUMPPORTAL, ping_interval=20) as ws:
                     await ws.send(json.dumps({"method": "subscribeNewToken"}))
+                    await ws.send(json.dumps({"method": "subscribeMigration"}))
                     logger.info("[pumpportal] connected")
                     async for raw in ws:
                         try:
                             msg = json.loads(raw)
                         except ValueError:
                             continue
-                        if not isinstance(msg, dict) or msg.get("txType") != "create":
+                        if not isinstance(msg, dict):
+                            continue
+                        if msg.get("txType") in ("migrate", "migration"):
+                            self.spawn(
+                                self.add_graduate(
+                                    str(msg.get("mint") or ""),
+                                    str(msg.get("pool") or ""),
+                                )
+                            )
+                            continue
+                        if msg.get("txType") != "create":
+                            if self.stats["other_msgs"] < 5:
+                                logger.info(f"[pumpportal] other: {str(raw)[:300]}")
+                            self.stats["other_msgs"] += 1
                             continue
                         if msg.get("pool", "pump") != "pump":
                             continue
@@ -771,7 +841,8 @@ class DevWatch:
         w = self.watched()
         lines = [
             f"Dev/funder watch (paper)  {now_iso()}  started {self.started}",
-            f"watchlist: {len(self.coins)} top coins, {len(self.creators)} creators, "
+            f"watchlist: {len(self.coins)} coins, {len(self.creators)} creators "
+            f"({sum(v.get('src') == 'grad' for v in self.creators.values())} from graduations), "
             f"{len(self.funders)} funders; following {sum(v == 'creator' for v in w.values())} creators + "
             f"{sum(v == 'funder' for v in w.values())} funders; {len(self.linked)} linked wallets; "
             f"{len(self.hubs)} hubs excluded",
@@ -791,6 +862,8 @@ class DevWatch:
         for kind in (
             "same_dev",
             "dev_new_wallet",
+            "grad_dev",
+            "grad_dev_new_wallet",
             "funder_launch",
             "funder_new_wallet",
             "control",
@@ -847,7 +920,7 @@ async def amain() -> None:
                 if px:
                     dw.sol_usd = px
                 await dw.refresh_watchlist()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.exception("[watchlist] refresh failed")
             await asyncio.sleep(REFRESH_HOURS * 3600)
 
@@ -860,7 +933,7 @@ async def amain() -> None:
                     f"[status] launches {dw.stats['launches']} open {len(dw.open)} "
                     f"results {len(dw.done)} links {len(dw.linked)}"
                 )
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.exception("save failed")
 
     await asyncio.gather(
