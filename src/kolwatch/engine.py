@@ -89,6 +89,9 @@ FEED_EVERY = 60
 PUSH_EVERY = 600
 DUMP_SECONDS = 300  # a sell this soon after the buy counts as a fast dump
 MIN_BUY_SOL = 0.05
+CALLS_URL = "https://raw.githubusercontent.com/Smurfetc/solana-memecoin-calls-dataset/main/calls.jsonl"
+CALLS_EVERY = 1800
+CANDIDATE_MIN_TRADES = 8
 
 EXITS = [name for name, *_ in VARIANTS] + ["follow", "follow_any"]
 KINDS = [
@@ -210,6 +213,7 @@ class KolWatch:
         self.fired: dict[str, float] = {}  # f"{kind}:{mint}" -> t
         self.open: list[CopyPath] = []
         self.chain_watched = 0
+        self.call_matches: list[dict] = []
         self.tx_queue: asyncio.Queue = asyncio.Queue(maxsize=1000)
         self.seen_sigs: set[str] = set()
         self.tasks: set[asyncio.Task] = set()  # strong refs; the loop keeps only weak ones
@@ -325,6 +329,7 @@ class KolWatch:
         self.open_buys[mint][wallet] = now - seen_lag
         self.wstat(wallet)["buys"] += 1
         self.stats[f"buys_{via}"] += 1
+        self.log_buy(now - seen_lag, wallet, info, mint, sol, via)
         if via == "gmgn":
             self.lags.append(seen_lag)
             self.lags = self.lags[-500:]
@@ -365,6 +370,80 @@ class KolWatch:
             f"via {meta['via']} lag {meta['seen_lag_s']}s"
         )
         self.spawn(self.track(kind, dict(meta), delay))
+
+    def log_buy(self, t: float, wallet: str, info: dict, mint: str, sol: float | None, via: str) -> None:
+        path = DATA / "kol_buys.csv"
+        new = not path.exists()
+        with path.open("a", newline="") as f:
+            w = csv.writer(f)
+            if new:
+                w.writerow(["t", "wallet", "name", "kind", "mint", "sol", "via"])
+            w.writerow([round(t), wallet, info.get("name", ""), info["kind"], mint,
+                        "" if sol is None else round(sol, 3), via])
+
+    # ----- public call record: did a followed wallet buy before a coin was called?
+    async def calls_loop(self) -> None:
+        while True:
+            try:
+                await asyncio.to_thread(self.match_calls)
+            except Exception:  # noqa: BLE001
+                logger.exception("[calls] match failed")
+            await asyncio.sleep(CALLS_EVERY)
+
+    def match_calls(self) -> None:
+        req = urllib.request.Request(CALLS_URL, headers={"User-Agent": "pumpfun-bot-kolwatch/1.0"})
+        with urllib.request.urlopen(req, timeout=60) as r:  # noqa: S310
+            calls = {}
+            for line in r.read().decode().splitlines():
+                try:
+                    c = json.loads(line)
+                    calls[c["mint"]] = c
+                except (ValueError, KeyError):
+                    continue
+        buys: dict[str, list[dict]] = defaultdict(list)
+        bp = DATA / "kol_buys.csv"
+        if bp.exists():
+            with bp.open() as f:
+                for b in csv.DictReader(f):
+                    if b["mint"] in calls:
+                        buys[b["mint"]].append(b)
+        rows = []
+        for mint, bs in buys.items():
+            c = calls[mint]
+            for b in bs:
+                lead = int(c["t"]) - int(b["t"])
+                rows.append({
+                    "mint": mint, "sym": c.get("sym"), "call_utc": c.get("utc"),
+                    "call_mc": c.get("mc"), "call_peak": c.get("peak"),
+                    "wallet": b["wallet"], "name": b["name"], "kind": b["kind"],
+                    "lead_s": lead, "before_call": lead > 0, "sol": b["sol"],
+                })
+        self.call_matches = rows
+        self.stats["calls_known"] = len(calls)
+        self.stats["calls_with_followed_buy"] = len(buys)
+        (DATA / "call_matches.json").write_text(json.dumps(rows))
+        logger.info(f"[calls] {len(calls)} calls, {len(buys)} bought by followed wallets")
+
+    def candidates(self) -> list[dict]:
+        """Wallets whose copies have paid under some exit, with enough trades to mean it."""
+        by = defaultdict(list)
+        for r in self.done:
+            if r["kind"] in ("kol_first", "smart_first") and r.get("wallet"):
+                by[r["wallet"]].append(r)
+        out = []
+        for w, rs in by.items():
+            if len(rs) < CANDIDATE_MIN_TRADES:
+                continue
+            best = None
+            for e in EXITS:
+                vals = [float(r[f"{e}_net"]) for r in rs]
+                med, win = statistics.median(vals), sum(v > 0 for v in vals) / len(vals)
+                if med > 0 and win >= 0.5 and (best is None or med > best[1]):
+                    best = (e, med, win, statistics.mean(vals))
+            if best:
+                out.append({"wallet": w, "name": self.follow.get(w, {}).get("name", ""), "n": len(rs),
+                            "exit": best[0], "median": best[1], "win": best[2], "mean": best[3]})
+        return sorted(out, key=lambda x: -x["median"])
 
     # ----- the Solana bot's share feed
     async def feed_loop(self) -> None:
@@ -680,6 +759,18 @@ class KolWatch:
                 if px:
                     base = p.meta.get("grad_base", (1 - GRAD_SIDE - LATENCY) ** 2)
                     mult = base * px / entry_px
+                    # A lone Jupiter print far from the last mark is usually a bad
+                    # quote on a thin pool: hold it until the next read agrees.
+                    if p.last > 0 and (mult > 3 * p.last or mult < p.last / 3):
+                        pend = p.meta.get("spike")
+                        if pend is None or abs(mult / pend - 1) > 0.3:
+                            p.meta["spike"] = mult
+                            self.stats["price_spikes_held"] += 1
+                            mult = None
+                        else:
+                            p.meta.pop("spike", None)
+                    else:
+                        p.meta.pop("spike", None)
             if mult is None:
                 fails += 1
                 if fails > 40:
@@ -792,6 +883,8 @@ class KolWatch:
             "feed": self.feed_status,
             "theories": self.theory_table(),
             "wallets": self.wallet_table(),
+            "candidates": self.candidates(),
+            "call_matches_before_call": [m for m in self.call_matches if m["before_call"]][-200:],
             "report": self.report(),
         }
 
@@ -824,6 +917,33 @@ class KolWatch:
                 lines.append(
                     f"  {w['wallet'][:8]}  {str(w['name'])[:15]:15} {w['kind']:5} {w['copies']:3} "
                     f"{w['follow_net']:+6.1%} {w['tp50_net']:+6.1%} {hold:>7} {dump:>6}"
+                )
+        cands = self.candidates()
+        lines.append(
+            f"\nCopy-trade candidates (>= {CANDIDATE_MIN_TRADES} copies, positive median and >= 50% wins under one exit):"
+        )
+        if not cands:
+            lines.append("  none yet")
+        for c in cands:
+            lines.append(
+                f"  {c['wallet'][:8]}  {str(c['name'])[:16]:16} n {c['n']:3}  exit {c['exit']:10} "
+                f"median {c['median']:+.1%}  mean {c['mean']:+.1%}  win {c['win']:.0%}"
+            )
+        if self.call_matches:
+            pre = [m for m in self.call_matches if m["before_call"]]
+            lines.append(
+                f"\nPublic calls (SmugCalls): {self.stats['calls_with_followed_buy']} called coins were bought by "
+                f"followed wallets; {len(pre)} buys came BEFORE the call:"
+            )
+            by = defaultdict(list)
+            for m in pre:
+                by[m["name"] or m["wallet"][:8]].append(m)
+            for name, ms in sorted(by.items(), key=lambda x: -len(x[1]))[:15]:
+                leads = sorted(m["lead_s"] for m in ms)
+                peaks = [float(m["call_peak"]) for m in ms]
+                lines.append(
+                    f"  {name[:18]:18} {len(ms):3} pre-call buys, median lead {statistics.median(leads) / 60:.0f} min, "
+                    f"median post-call peak x{statistics.median(peaks):.2f}"
                 )
         return "\n".join(lines)
 
@@ -874,6 +994,7 @@ async def amain() -> None:
         kw.chain_loop(websockets),
         kw.chain_worker(),
         kw.chain_worker(),
+        kw.calls_loop(),
     )
 
 
