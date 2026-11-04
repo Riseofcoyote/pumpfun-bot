@@ -449,6 +449,15 @@ class KolWatch:
             return
         tx = msg.get("txType")
         trader = str(msg.get("traderPublicKey") or "")
+        if tx is None:
+            self.stats["pp_other"] += 1
+            if self.stats["pp_other"] <= 20:
+                logger.warning(f"[pumpportal] reply: {raw[:300]}")
+            return
+        if tx in ("buy", "sell"):
+            self.stats["pp_trades"] += 1
+            if trader not in self.follow:
+                self.stats["pp_trades_unfollowed"] += 1
         if tx in ("buy", "sell") and trader in self.follow:
             sol = msg.get("solAmount")
             self.on_trade(
