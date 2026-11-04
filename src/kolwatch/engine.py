@@ -1,8 +1,10 @@
 """Paper test: does copying KOL / smart-money wallets pay, and how?
 
-Wallets come from the Solana paper bot's share feed (GMGN ``track kol`` and
-``track smartmoney``, see Riseofcoyote/Bot ``/api/share/feed``) plus any listed
-in ``kols.json`` in the data dir. Each followed wallet is then watched live on
+Wallets come from the bundled ``seed_kols.json`` (472 KolScan KOL wallets with
+their X handles and 126 GMGN smart-money wallets, from the public
+nirholas/kol-quest data), any listed in ``kols.json`` in the data dir, and,
+when SOLBOT_TOKEN is set, the Solana paper bot's share feed (GMGN ``track kol``
+and ``track smartmoney``, see Riseofcoyote/Bot ``/api/share/feed``). Each followed wallet is then watched live on
 PumpPortal's free ``subscribeAccountTrade`` stream, so a buy is usually seen
 within a second or two, well before a caller posts on X.
 
@@ -206,22 +208,28 @@ class KolWatch:
         self.load_seed()
 
     def load_seed(self) -> None:
-        """Wallets listed by hand in kols.json: [{"wallet": "...", "name": "@x"}]."""
-        p = DATA / "kols.json"
-        if not p.exists():
-            p.write_text("[]\n")
-            return
-        try:
-            for row in json.loads(p.read_text()):
-                w = str(row.get("wallet", "")).strip()
+        """Bundled seed_kols.json (KolScan KOLs, GMGN smart money) plus kols.json.
+
+        Both are lists of {"wallet", "name", "kind": "kol"|"smart"}; the data-dir
+        kols.json is for wallets added by hand and wins over the bundled list.
+        """
+        user = DATA / "kols.json"
+        if not user.exists():
+            user.write_text("[]\n")
+        for p in (Path(__file__).with_name("seed_kols.json"), user):
+            try:
+                rows = json.loads(p.read_text())
+            except (OSError, ValueError) as e:
+                logger.warning(f"{p.name} unreadable: {e}")
+                continue
+            for row in rows if isinstance(rows, list) else []:
+                w = str(row.get("wallet", "")).strip() if isinstance(row, dict) else ""
                 if 32 <= len(w) <= 44:
                     self.follow[w] = {
-                        "kind": "kol",
+                        "kind": "smart" if row.get("kind") == "smart" else "kol",
                         "name": str(row.get("name") or "")[:40],
                         "src": "seed",
                     }
-        except (OSError, ValueError, AttributeError) as e:
-            logger.warning(f"kols.json unreadable: {e}")
 
     # ----- wallet book-keeping
     def wstat(self, wallet: str) -> dict:
