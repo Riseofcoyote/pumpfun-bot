@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import csv
+import hashlib
 import json
 import logging
 import logging.handlers
@@ -53,7 +54,9 @@ CURVE_FEE = 0.0125  # pump.fun protocol + creator fee per side
 LATENCY = 0.01  # price moving against us between signal and fill, per side
 GRAD_SIDE = 0.01  # per-side cost once trading on PumpSwap
 ENTRY_DELAY = 2.0  # seconds from create to our simulated buy
-TRACK_SECONDS = int(os.environ.get("DEVWATCH_TRACK_SECONDS", "3600"))  # shorter only in smoke tests
+TRACK_SECONDS = int(
+    os.environ.get("DEVWATCH_TRACK_SECONDS", "3600")
+)  # shorter only in smoke tests
 CONTROL_EVERY = 240  # seconds between random control launches
 REFRESH_HOURS = 6
 TOP_PAGES = 8  # 20 pools per page
@@ -105,6 +108,53 @@ def b58encode(b: bytes) -> str:
         n, r = divmod(n, 58)
         out = _B58[r] + out
     return "1" * (len(b) - len(b.lstrip(b"\0"))) + out
+
+
+def b58decode(s: str) -> bytes:
+    n = 0
+    for ch in s:
+        n = n * 58 + _B58.index(ch)
+    body = n.to_bytes((n.bit_length() + 7) // 8, "big") if n else b""
+    return b"\0" * (len(s) - len(s.lstrip("1"))) + body
+
+
+_P = 2**255 - 19
+_D = -121665 * pow(121666, _P - 2, _P) % _P
+
+
+def _on_curve(b: bytes) -> bool:
+    """Whether 32 bytes decode to a point on ed25519 (PDAs must not)."""
+    y = int.from_bytes(b, "little") & ((1 << 255) - 1)
+    if y >= _P:
+        return False
+    u = (y * y - 1) % _P
+    v = (_D * y * y + 1) % _P
+    x2 = u * pow(v, _P - 2, _P) % _P
+    if x2 == 0:
+        return True
+    return pow(x2, (_P - 1) // 2, _P) == 1
+
+
+def find_pda(seeds: list[bytes], program: str) -> str:
+    prog = b58decode(program)
+    for bump in range(255, -1, -1):
+        h = hashlib.sha256(
+            b"".join(seeds) + bytes([bump]) + prog + b"ProgramDerivedAddress"
+        ).digest()
+        if not _on_curve(h):
+            return b58encode(h)
+    raise ValueError("no PDA")
+
+
+PUMP_PROGRAM = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
+
+
+def curve_address(mint: str) -> str:
+    return find_pda([b"bonding-curve", b58decode(mint)], PUMP_PROGRAM)
+
+
+def is_pump_dex(rec: dict) -> bool:
+    return rec["mint"].endswith("pump") or "pump" in rec["dex"]
 
 
 # ---------------------------------------------------------------- account decoding
@@ -362,14 +412,20 @@ class DevWatch:
                 )
                 for p in (doc or {}).get("data") or []:
                     rec = feeds._parse_gt_pool(p)  # noqa: SLF001
+                    # pump.fun origin is checked on chain (creator_of), not by suffix.
                     if (
                         rec
-                        and rec["mint"].endswith("pump")
                         and rec["mcap"] >= MIN_TOP_MCAP
+                        and rec["vol"]["h24"] >= 50_000
                     ):
                         pools.append(rec)
                 if dex == "pump-fun" and page >= 2:
                     break
+        # Coins the trending/top-volume lists carry right now, too.
+        snap = await asyncio.to_thread(feeds.discover)
+        pools += [
+            r for r in snap.values() if r["mcap"] >= MIN_TOP_MCAP and is_pump_dex(r)
+        ]
         new_creators = []
         for rec in pools:
             coin = self.coins.get(rec["mint"])
@@ -379,9 +435,9 @@ class DevWatch:
                     c = self.creators[coin["creator"]]
                     c["best_mcap"] = max(c["best_mcap"], coin["mcap"])
                 continue
-            data = await self.rpc.account(rec["pool"])
-            creator = creator_from_account(data) if data else None
+            creator = await self.creator_of(rec["mint"], rec["pool"])
             if not creator or creator in EXCHANGES:
+                self.stats["no_creator"] += 1
                 continue
             self.coins[rec["mint"]] = {
                 "symbol": rec["symbol"],
@@ -413,6 +469,18 @@ class DevWatch:
             f"{len(self.creators)} creators, {len(self.funders)} funders, "
             f"watching {len(w)} wallets, {len(self.linked)} linked, {len(self.hubs)} hubs"
         )
+
+    async def creator_of(self, mint: str, pool: str) -> str | None:
+        """The pump.fun creator: from the coin's bonding curve, else its pool.
+
+        None for a coin that never had a pump.fun curve.
+        """
+        data = await self.rpc.account(curve_address(mint))
+        cur = decode_curve(data) if data else None
+        if cur and cur["creator"] != DEFAULT_KEY:
+            return cur["creator"]
+        data = await self.rpc.account(pool)
+        return pool_coin_creator(data) if data else None
 
     async def trace_funder(self, wallet: str) -> str | None:
         """The wallet that sent ``wallet`` its first real SOL, from its oldest txs."""
