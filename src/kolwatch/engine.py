@@ -166,6 +166,7 @@ class KolWatch:
         self.wallet_stats: dict[str, dict] = {}
         self.fired: dict[str, float] = {}  # f"{kind}:{mint}" -> t
         self.open: list[CopyPath] = []
+        self.tasks: set[asyncio.Task] = set()  # strong refs; the loop keeps only weak ones
         self.done: list[dict] = []
         self.stats = Counter()
         self.feed_status: dict = {}
@@ -310,7 +311,7 @@ class KolWatch:
             f"[signal] {kind} {meta['mint']} by {meta['wallet'][:8]} {meta.get('name')} "
             f"via {meta['via']} lag {meta['seen_lag_s']}s"
         )
-        asyncio.create_task(self.track(kind, dict(meta), delay))
+        self.spawn(self.track(kind, dict(meta), delay))
 
     # ----- the Solana bot's share feed
     async def feed_loop(self) -> None:
@@ -465,9 +466,14 @@ class KolWatch:
                     "curve": msg.get("bondingCurveKey"),
                     "dumper_rate": None,
                 }
-                asyncio.create_task(self.track("control", meta, ENTRY_DELAY))
+                self.spawn(self.track("control", meta, ENTRY_DELAY))
 
     # ----- paper trade
+    def spawn(self, coro) -> None:  # noqa: ANN001
+        t = asyncio.create_task(coro)
+        self.tasks.add(t)
+        t.add_done_callback(self.tasks.discard)
+
     async def track(self, kind: str, meta: dict, delay: float) -> None:
         mint = meta["mint"]
         await asyncio.sleep(delay)
