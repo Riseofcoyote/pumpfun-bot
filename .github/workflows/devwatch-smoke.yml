@@ -46,12 +46,12 @@ jobs:
                   if not r: continue
                   data = await rpc.account(r["pool"])
                   if data: print("  pool base_mint", E.b58encode(data[43:75]), "mint", r["mint"], "coin_creator", E.b58encode(data[211:243]), "curve", E.curve_address(r["mint"]))
-          print("ata check", E.find_pda([E.b58decode("Et8w4DyfUkqMebyMj5iv7ugTKfDKjzTDJ2RPDVu8zsRp"),E.b58decode("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"),E.b58decode("So11111111111111111111111111111111111111112")],"ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"))
                   c = await dw.creator_of(r["mint"], r["pool"])
                   sigs = await rpc.call("getSignaturesForAddress", [c, {"limit": 1000}]) if c else None
                   f = await dw.trace_funder(c) if c else None
                   print(r["symbol"], r["mint"][-6:], "acct", len(data) if data else None, "creator", c, "sigs", len(sigs) if isinstance(sigs, list) else sigs, "funder", f)
           asyncio.run(t())
+          print("ata check", E.find_pda([E.b58decode("Et8w4DyfUkqMebyMj5iv7ugTKfDKjzTDJ2RPDVu8zsRp"),E.b58decode("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"),E.b58decode("So11111111111111111111111111111111111111112")],"ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"))
           PY
       - name: Run
         working-directory: src
