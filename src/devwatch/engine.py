@@ -58,9 +58,9 @@ TRACK_SECONDS = int(
     os.environ.get("DEVWATCH_TRACK_SECONDS", "3600")
 )  # shorter only in smoke tests
 CONTROL_EVERY = 240  # seconds between random control launches
-REFRESH_HOURS = 6
-TOP_PAGES = 8  # 20 pools per page
-MIN_TOP_MCAP = 300_000
+REFRESH_HOURS = 2
+TOP_PAGES = 10  # 20 pools per page (GeckoTerminal maximum)
+MIN_TOP_MCAP = 150_000
 MAX_CREATORS = 150
 MAX_FUNDERS = 100
 LINK_DAYS = 7
