@@ -71,7 +71,10 @@ PUMPPORTAL_KEY = os.environ.get("PUMPPORTAL_API_KEY", "")  # funded key unlocks 
 PUMP_PROGRAM = "6EF8rrecthR5Dzon8Nwu78hRvfCKubJ14M5uBEwF6P"
 PUMPSWAP_PROGRAM = "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA"
 PUBLIC_WSS = "wss://api.mainnet-beta.solana.com"
-WALLETS_PER_SOCKET = 200
+WALLETS_PER_SOCKET = 100
+CHAIN_KOLS = 180  # best-ranked wallets watched on chain; the rest only via feeds
+CHAIN_SMART = 70
+SUB_GAP = 0.25  # seconds between logsSubscribe requests
 QUOTE_MINTS = {SOL_MINT, "EPjFWdd5AufqSMqeM2qzyBK72uozdbq7rpWYD58sXG3u"}
 
 ENTRY_DELAY = 2.0
@@ -206,6 +209,7 @@ class KolWatch:
         self.wallet_stats: dict[str, dict] = {}
         self.fired: dict[str, float] = {}  # f"{kind}:{mint}" -> t
         self.open: list[CopyPath] = []
+        self.chain_watched = 0
         self.tx_queue: asyncio.Queue = asyncio.Queue(maxsize=1000)
         self.seen_sigs: set[str] = set()
         self.tasks: set[asyncio.Task] = set()  # strong refs; the loop keeps only weak ones
@@ -269,6 +273,7 @@ class KolWatch:
                         "kind": "smart" if row.get("kind") == "smart" else "kol",
                         "name": str(row.get("name") or "")[:40],
                         "src": "seed",
+                        "rank": int(row.get("rank") or 9999),
                     }
 
     # ----- wallet book-keeping
@@ -484,34 +489,45 @@ class KolWatch:
             await asyncio.sleep(30)
 
     # ----- on-chain wallet watch (free): logsSubscribe per wallet, then parse the tx
+    def chain_wallets(self) -> list[str]:
+        def best(kind: str, n: int) -> list[str]:
+            ws = [w for w, v in self.follow.items() if v["kind"] == kind]
+            return sorted(ws, key=lambda w: self.follow[w].get("rank", 9999))[:n]
+
+        return best("kol", CHAIN_KOLS) + best("smart", CHAIN_SMART)
+
     async def chain_loop(self, websockets) -> None:  # noqa: ANN001
-        """Keep one public-WSS connection per WALLETS_PER_SOCKET followed wallets."""
-        running: dict[int, asyncio.Task] = {}
-        while True:
-            wallets = sorted(self.follow)
-            chunks = [wallets[i : i + WALLETS_PER_SOCKET] for i in range(0, len(wallets), WALLETS_PER_SOCKET)]
-            for i, chunk in enumerate(chunks):
-                t = running.get(i)
-                if t is None or t.done():
-                    running[i] = asyncio.create_task(self.chain_socket(websockets, i, chunk))
-            await asyncio.sleep(600)
-            for t in running.values():
-                t.cancel()  # pick up wallet-list changes
-            running.clear()
+        """One public-WSS connection per WALLETS_PER_SOCKET of the best-ranked wallets."""
+        wallets = self.chain_wallets()
+        self.chain_watched = len(wallets)
+        chunks = [wallets[i : i + WALLETS_PER_SOCKET] for i in range(0, len(wallets), WALLETS_PER_SOCKET)]
+        tasks = []
+        for i, chunk in enumerate(chunks):
+            tasks.append(asyncio.create_task(self.chain_socket(websockets, i, chunk)))
+            await asyncio.sleep(WALLETS_PER_SOCKET * SUB_GAP + 5)
+        await asyncio.gather(*tasks)
 
     async def chain_socket(self, websockets, idx: int, wallets: list[str]) -> None:  # noqa: ANN001
         url = os.environ.get("KOLWATCH_WSS") or PUBLIC_WSS
+        backoff = 30
         while True:
             try:
                 async with websockets.connect(url, ping_interval=20, max_size=2**23) as ws:
                     reqs: dict[int, str] = {}
                     subs: dict[int, str] = {}
-                    for i, wallet in enumerate(wallets, start=1):
-                        reqs[i] = wallet
-                        await ws.send(json.dumps({
-                            "jsonrpc": "2.0", "id": i, "method": "logsSubscribe",
-                            "params": [{"mentions": [wallet]}, {"commitment": "confirmed"}],
-                        }))
+                    async def subscribe() -> None:
+                        try:
+                            for i, wallet in enumerate(wallets, start=1):
+                                reqs[i] = wallet
+                                await ws.send(json.dumps({
+                                    "jsonrpc": "2.0", "id": i, "method": "logsSubscribe",
+                                    "params": [{"mentions": [wallet]}, {"commitment": "confirmed"}],
+                                }))
+                                await asyncio.sleep(SUB_GAP)
+                        except Exception:  # noqa: BLE001
+                            return  # socket closed mid-way; the outer loop reconnects
+
+                    self.spawn(subscribe())
                     logger.info(f"[chain] socket {idx}: subscribing to {len(wallets)} wallets")
                     async for raw in ws:
                         msg = json.loads(raw)
@@ -519,6 +535,7 @@ class KolWatch:
                             if "result" in msg:
                                 subs[msg["result"]] = reqs[msg["id"]]
                                 self.stats["chain_subs"] += 1
+                                backoff = 30
                             else:
                                 self.stats["chain_sub_errors"] += 1
                             continue
@@ -542,8 +559,9 @@ class KolWatch:
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001
-                logger.warning(f"[chain] socket {idx}: {type(e).__name__} {e}")
-                await asyncio.sleep(15)
+                logger.warning(f"[chain] socket {idx}: {type(e).__name__} {str(e)[:120]}; retry in {backoff}s")
+                await asyncio.sleep(backoff + random.uniform(0, 20))
+                backoff = min(backoff * 2, 900)
             if len(self.seen_sigs) > 50_000:
                 self.seen_sigs.clear()
 
@@ -782,7 +800,8 @@ class KolWatch:
         lag = statistics.median(self.lags) if self.lags else None
         lines = [
             f"KOL / smart-money copy test (paper)  {now_iso()}  started {self.started}",
-            f"following {len(self.follow)} wallets {dict(kinds)}; subscribed live {len(self.subscribed)}",
+            f"following {len(self.follow)} wallets {dict(kinds)}; on chain {self.chain_watched} "
+            f"(subs ok {self.stats['chain_subs']}); PumpPortal live {len(self.subscribed)}",
             f"feed: {self.feed_status}",
             f"GMGN feed median lag behind the chain: {lag if lag is None else round(lag)} s",
             f"counts: {dict(self.stats)}  open: {len(self.open)}  rpc: {dict(self.rpc.calls)}",
