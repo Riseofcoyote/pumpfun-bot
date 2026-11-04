@@ -497,8 +497,11 @@ class DevWatch:
 
     # ----- linked wallets
     async def logs_loop(self, websockets) -> None:  # noqa: ANN001
-        url = os.environ.get("SOLANA_NODE_WSS_ENDPOINT") or PUBLIC_WSS
+        plan = os.environ.get("SOLANA_NODE_WSS_ENDPOINT")
+        urls = [PUBLIC_WSS] + ([plan] if plan else [])
+        which = 0
         while True:
+            url = urls[which % len(urls)]
             w = self.watched()
             version = self.watch_version
             if not w:
@@ -548,8 +551,9 @@ class DevWatch:
                         if self.watch_version != version:
                             break  # watchlist changed: resubscribe
             except Exception as e:  # noqa: BLE001
+                which += 1  # the other endpoint next time
                 logger.warning(f"[logs] connection error: {type(e).__name__} {e}")
-                await asyncio.sleep(10)
+                await asyncio.sleep(10 if which % len(urls) else 30)
             if len(self.seen_sigs) > 50_000:
                 self.seen_sigs.clear()
 
