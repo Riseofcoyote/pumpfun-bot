@@ -13,5 +13,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: superfly/flyctl-actions/setup-flyctl@master
+      - name: Stage SOLBOT_TOKEN (Solana paper bot's DASHBOARD_TOKEN) if the repo secret exists
+        env:
+          SOLBOT_TOKEN: ${{ secrets.SOLBOT_TOKEN }}
+        if: env.SOLBOT_TOKEN != ''
+        run: flyctl secrets set --stage --app pumpfun-bot-w1afdq SOLBOT_TOKEN="$SOLBOT_TOKEN"
       - run: flyctl deploy --remote-only --app pumpfun-bot-w1afdq
       - run: flyctl status --app pumpfun-bot-w1afdq

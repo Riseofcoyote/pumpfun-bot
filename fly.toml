@@ -18,13 +18,16 @@ primary_region = "ewr"
 [env]
   TRENDING_DATA_DIR = "/data/trades/trending"
   DEVWATCH_DATA_DIR = "/data/trades/devwatch"
+  KOLWATCH_DATA_DIR = "/data/trades/kolwatch"
+  SOLBOT_URL = "https://rock-solana-paper-bot.fly.dev"
   PAPER_SIZE_SOL = "0.2"
 
-# Two paper-only testers (src/trending, src/devwatch); if either exits, the
-# machine restarts both. Neither spends SOL or loads the wallet. To go back to the new-coin sniper, use:
+# Three paper-only testers (src/trending, src/devwatch, src/kolwatch); if any
+# exits, the machine restarts all of them. kolwatch reads the Solana paper bot's
+# share feed with the SOLBOT_TOKEN secret and pushes its reports back. Neither spends SOL or loads the wallet. To go back to the new-coin sniper, use:
 #   app = "sh -c 'mkdir -p /data/trades /data/logs && exec uv run --no-sync pump_bot'"
 [processes]
-  app = "bash -c 'mkdir -p /data/trades/trending /data/trades/devwatch /data/logs && cd /app/src && /app/.venv/bin/python -m trending.engine & cd /app/src && /app/.venv/bin/python -m devwatch.engine & wait -n; exit 1'"
+  app = "bash -c 'mkdir -p /data/trades/trending /data/trades/devwatch /data/trades/kolwatch /data/logs && cd /app/src && /app/.venv/bin/python -m trending.engine & cd /app/src && /app/.venv/bin/python -m devwatch.engine & cd /app/src && /app/.venv/bin/python -m kolwatch.engine & wait -n; exit 1'"
 
 # The bot exits with code 0 if its trading process stops, and Fly's default
 # (on-failure) does not restart on code 0. Always restart instead.

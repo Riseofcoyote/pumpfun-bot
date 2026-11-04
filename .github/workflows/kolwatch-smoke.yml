@@ -1,0 +1,31 @@
+# Runs the KOL copy paper tester for a few minutes against live data. Moves no
+# funds. Uses the optional SOLBOT_TOKEN secret to read the Solana bot's feed.
+name: KOL watch smoke test
+on:
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: "How long to run"
+        default: "15"
+permissions:
+  contents: read
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -q websockets solders
+      - name: Run
+        working-directory: src
+        env:
+          KOLWATCH_DATA_DIR: /tmp/kolwatch
+          SOLBOT_TOKEN: ${{ secrets.SOLBOT_TOKEN }}
+        run: timeout ${{ inputs.minutes }}m python -m kolwatch.engine || true
+      - name: Results
+        run: |
+          cat /tmp/kolwatch/report.txt || true
+          echo "=== log"; grep -a -v "\[result\] control" /tmp/kolwatch/engine.log | tail -100
