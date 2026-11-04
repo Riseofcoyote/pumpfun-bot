@@ -19,10 +19,43 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install -q websockets
+      - name: Probe watchlist sources
+        working-directory: src
+        run: |
+          python - <<'PY'
+          import asyncio
+          from trending import feeds
+          from devwatch import engine as E
+          for dex in ("pumpswap", "pump-fun", "pump_fun", "pumpfun"):
+              for page in (1, 2, 5, 8):
+                  url = f"{feeds.GT}/networks/solana/dexes/{dex}/pools?sort=h24_volume_usd_desc&page={page}"
+                  doc = feeds.get_json(url, feeds.GT_GATE, feeds.GT_HDR)
+                  data = (doc or {}).get("data") or []
+                  recs = [feeds._parse_gt_pool(p) for p in data]
+                  ok = [r for r in recs if r]
+                  pump = [r for r in ok if r["mint"].endswith("pump")]
+                  big = [r for r in pump if r["mcap"] >= E.MIN_TOP_MCAP]
+                  print(dex, page, "raw", len(data), "parsed", len(ok), "pump-suffix", len(pump), "mcap>=300k", len(big),
+                        [ (r["symbol"], round(r["mcap"])) for r in pump[:4]])
+          async def t():
+              rpc = E.Rpc(); dw = E.DevWatch(rpc)
+              url = f"{feeds.GT}/networks/solana/dexes/pumpswap/pools?sort=h24_volume_usd_desc&page=1"
+              doc = feeds.get_json(url, feeds.GT_GATE, feeds.GT_HDR)
+              for p in (doc or {}).get("data", [])[:8]:
+                  r = feeds._parse_gt_pool(p)
+                  if not r: continue
+                  data = await rpc.account(r["pool"])
+                  c = E.creator_from_account(data) if data else None
+                  sigs = await rpc.call("getSignaturesForAddress", [c, {"limit": 1000}]) if c else None
+                  f = await dw.trace_funder(c) if c else None
+                  print(r["symbol"], r["mint"][-6:], "acct", len(data) if data else None, "creator", c, "sigs", len(sigs) if isinstance(sigs, list) else sigs, "funder", f)
+          asyncio.run(t())
+          PY
       - name: Run
         working-directory: src
         env:
           DEVWATCH_DATA_DIR: /tmp/devwatch
+          DEVWATCH_TRACK_SECONDS: "240"
         run: timeout ${{ inputs.minutes }}m python -m devwatch.engine || true
       - name: Results
         run: |
