@@ -673,8 +673,15 @@ class DevWatch:
         if not curve_addr or not mint:
             return
         await asyncio.sleep(ENTRY_DELAY)
-        data = await self.rpc.account(curve_addr)
-        cur = decode_curve(data) if data else None
+        # A curve created seconds ago is often not visible yet at "confirmed";
+        # the fill uses the first read that succeeds (later = worse price).
+        cur = None
+        for _ in range(4):
+            data = await self.rpc.account(curve_addr)
+            cur = decode_curve(data) if data else None
+            if cur:
+                break
+            await asyncio.sleep(1.5)
         if (
             not cur
             or cur["complete"]
