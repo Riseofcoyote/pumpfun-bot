@@ -14,18 +14,22 @@ SOURCES = ("any", "trend5m", "trend1h", "volume")
 # Pools younger than this are fresh launches, not the established trending and
 # top-volume tokens this engine is for; no strategy may buy them.
 MIN_POOL_AGE_H = 6.0
+# Hard entry limits no genome can relax. Pools under $50k liquidity and buys
+# into a 5-minute candle already up 10% lost after costs in every ledger so far.
+MIN_LIQ_USD = 50_000.0
+MAX_ENTRY_M5 = 0.10
 
 # name -> (low, high, kind). kind "f" float, "i" int, "log" float sampled in log space.
 RANGES: dict[str, tuple[float, float, str]] = {
-    "min_liq": (5_000, 150_000, "log"),
+    "min_liq": (50_000, 500_000, "log"),
     "max_mcap": (200_000, 200_000_000, "log"),
     "min_age_h": (6, 72, "f"),
     "max_age_h": (24, 5_000, "log"),
     "max_rank": (8, 40, "i"),
     "m5_min": (-0.10, 0.05, "f"),
-    "m5_max": (0.02, 0.50, "f"),
+    "m5_max": (0.02, 0.10, "f"),
     "h1_min": (-0.30, 0.40, "f"),
-    "h1_max": (0.05, 5.0, "log"),
+    "h1_max": (0.05, 1.0, "log"),
     "h6_min": (-0.5, 2.0, "f"),
     "h24_min": (-0.9, 3.0, "f"),
     "h24_max": (0.2, 20.0, "log"),
@@ -33,8 +37,11 @@ RANGES: dict[str, tuple[float, float, str]] = {
     "min_m5_vol": (500, 60_000, "log"),
     "min_m5_buyers": (0, 60, "i"),
     "surge_k": (1.2, 5.0, "f"),
+    # Skip pools ranked above this on the 5-minute trending list (1 = off):
+    # the hottest few were the worst entries, ranks 20-40 the best.
+    "min_t5_rank": (1, 25, "i"),
     "tp": (0.06, 1.0, "log"),
-    "sl": (0.05, 0.35, "log"),
+    "sl": (0.05, 0.50, "log"),
     "trail_act": (0.03, 0.5, "log"),
     "trail_dist": (0.015, 0.25, "log"),
     # Under ~20 minutes the typical move does not cover the ~2% round trip.
@@ -43,7 +50,8 @@ RANGES: dict[str, tuple[float, float, str]] = {
 }
 BOOLS = ("pump_only", "use_trail", "fade_exit")
 LOOSE = {
-    "min_liq": 5_000.0,
+    "min_liq": 50_000.0,
+    "min_t5_rank": 1.0,
     "max_mcap": 200_000_000.0,
     "min_age_h": 6.0,
     "max_age_h": 5_000.0,
@@ -54,7 +62,7 @@ LOOSE = {
     "min_m5_vol": 500.0,
     "buy_ratio_min": 0.6,
     "h1_min": -0.30,
-    "h1_max": 5.0,
+    "h1_max": 1.0,
 }
 
 
@@ -111,6 +119,9 @@ def _repair(s: dict) -> None:
         s["m5_max"] = min(s["m5_max"], 0.0)
         s["m5_min"] = min(s["m5_min"], -0.02)
         s["h1_min"] = max(s["h1_min"], 0.05)
+    if s["family"] == "fresh_trend" or s["source"] == "trend5m":
+        # The rank cap has to leave a band above the hot-rank skip.
+        s["max_rank"] = max(s["max_rank"], s["min_t5_rank"] + 5)
     if s["use_trail"] and s["trail_act"] > s["tp"]:
         s["trail_act"] = s["tp"] * 0.6
 
@@ -162,7 +173,7 @@ def entry_signal(s: dict, rec: dict, prev_ranks: dict[str, int] | None) -> bool:
     """
     if rec["age_h"] < MIN_POOL_AGE_H:
         return False
-    if rec["liq"] < s["min_liq"] or rec["mcap"] > s["max_mcap"]:
+    if rec["liq"] < max(MIN_LIQ_USD, s["min_liq"]) or rec["mcap"] > s["max_mcap"]:
         return False
     if not (s["min_age_h"] <= rec["age_h"] <= s["max_age_h"]):
         return False
@@ -174,6 +185,11 @@ def entry_signal(s: dict, rec: dict, prev_ranks: dict[str, int] | None) -> bool:
         if r is None or r > s["max_rank"]:
             return False
     pc, tx, vol = rec["pc"], rec["tx"]["m5"], rec["vol"]
+    if pc["m5"] > MAX_ENTRY_M5:
+        return False
+    t5 = ranks.get("trend5m")
+    if t5 is not None and t5 < s.get("min_t5_rank", 1.0):
+        return False
     ratio = tx["buys"] / max(tx["sells"], 1)
     if ratio < s["buy_ratio_min"] or vol["m5"] < s["min_m5_vol"]:
         return False
@@ -256,6 +272,8 @@ def describe(s: dict) -> str:
         parts.append(f"surge x{s['surge_k']:.1f}")
     if s["source"] != "any" or s["family"] in ("fresh_trend", "volume_leader"):
         parts.append(f"rank<={s['max_rank']:.0f}")
+    if s.get("min_t5_rank", 1.0) > 1:
+        parts.append(f"t5rank>={s['min_t5_rank']:.0f}")
     if s["use_trail"]:
         parts.append(f"trail {s['trail_act']:.0%}/{s['trail_dist']:.0%}")
     parts.append(f"hold {s['max_hold_min']:.0f}m")

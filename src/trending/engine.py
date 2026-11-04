@@ -95,6 +95,21 @@ def new_stats() -> dict:
     }
 
 
+def _same_record(a: dict, b: dict) -> bool:
+    """Same family and the same trades to within a point of return each.
+
+    Copies born a few minutes apart fill the same token a tick apart, so their
+    returns differ in the third decimal; exact equality missed them.
+    """
+    ra, rb = a["stats"]["rets"], b["stats"]["rets"]
+    if a["family"] != b["family"] or abs(len(ra) - len(rb)) > 1:
+        return False
+    n = min(len(ra), len(rb))
+    if n < MIN_TRADES_RANKED:
+        return False
+    return all(abs(x - y) <= 0.01 for x, y in zip(ra[-n:], rb[-n:], strict=True))
+
+
 def score(st: dict) -> float:
     """Average net return per trade, shrunk toward zero for small samples."""
     return st["sum"] / (st["n"] + 8)
@@ -397,6 +412,63 @@ SEEDS_V4 = [
     },
 ]
 
+# v5, from 251 unique fills: chasing (5m up 10%+, top-10 on 5m trending) and
+# pools under $100k lost; the stop-loss exits alone (-21% each) were more than
+# the whole loss, while 40-60 minute holds on calm entries were positive gross.
+# These test calm entries on deep pools with a catastrophe-only stop.
+_V5_BASE = {
+    "source": "any",
+    "max_rank": 30,
+    "min_t5_rank": 15,
+    "min_age_h": 6,
+    "max_age_h": 5_000,
+    "m5_min": -0.02,
+    "m5_max": 0.02,
+    "h1_min": -0.05,
+    "h1_max": 0.15,
+    "h6_min": -0.2,
+    "h24_min": 0.0,
+    "h24_max": 2.0,
+    "buy_ratio_min": 0.6,
+    "min_m5_vol": 1_000,
+    "min_m5_buyers": 0,
+    "pump_only": False,
+    "cooldown_min": 45,
+    "min_liq": 100_000,
+    "max_mcap": 200_000_000,
+    "fade_exit": False,
+}
+SEEDS_V5 = [
+    _V5_BASE
+    | {
+        "family": "volume_leader",
+        "source": "volume",
+        "max_rank": 25,
+        "tp": 0.25,
+        "sl": 0.45,
+        "use_trail": False,
+        "max_hold_min": 55,
+    },
+    _V5_BASE
+    | {
+        "family": "momentum",
+        "tp": 0.40,
+        "sl": 0.45,
+        "use_trail": True,
+        "trail_act": 0.15,
+        "trail_dist": 0.08,
+        "max_hold_min": 120,
+    },
+    _V5_BASE
+    | {
+        "family": "momentum",
+        "tp": 0.20,
+        "sl": 0.25,
+        "use_trail": False,
+        "max_hold_min": 55,
+    },
+]
+
 SEEDS = [
     # Hand-built starting points, one or more per family; evolution takes over.
     {
@@ -526,7 +598,7 @@ class Engine:
     # ---------- population ----------
     def seed(self) -> None:
         self.injected = ["v3", "v4"]
-        for spec in SEEDS + SEEDS_V2 + SEEDS_V3 + SEEDS_V4:
+        for spec in SEEDS + SEEDS_V2 + SEEDS_V3 + SEEDS_V4 + SEEDS_V5:
             s = random_strategy(self.rng, spec["family"])
             s.update(spec)
             repair(s)
@@ -825,16 +897,16 @@ class Engine:
         Mutating a parameter that never binds yields a copy that takes the same
         trades; copies waste population and make one result look like many.
         """
-        seen: set[tuple] = set()
+        kept: list[dict] = []
         out = []
         for s in sorted(pool, key=lambda s: s["born"]):
             r = s["stats"]["rets"]
             if len(r) < MIN_TRADES_RANKED:
                 continue
-            key = (s["family"], tuple(r))
-            if key in seen and s["id"] not in self.candidates:
+            if s["id"] not in self.candidates and any(_same_record(k, s) for k in kept):
                 out.append(s)
-            seen.add(key)
+            else:
+                kept.append(s)
         return out
 
     def _tournament(self, pool: list[dict]) -> dict:
@@ -954,10 +1026,13 @@ class Engine:
             for name in RANGES:
                 s.setdefault(name, LOOSE.get(name, RANGES[name][0]))
             s["stats"].setdefault("mints", {})
+            repair(s)
         if "v3" not in self.injected:
             self._inject("v3", SEEDS_V3)
         if "v4" not in self.injected:
             self._inject("v4", SEEDS_V4)
+        if "v5" not in self.injected:
+            self._inject("v5", SEEDS_V5)
         now = time.time()
         self.cooldown = {k: v for k, v in self.cooldown.items() if v > now}
         return True
