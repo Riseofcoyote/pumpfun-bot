@@ -59,7 +59,11 @@ CANDIDATE_MAX_TOKEN_SHARE = 0.25
 # v2: pools under MIN_POOL_AGE_H are excluded and holds are longer. v1 results
 # came almost entirely from fresh launches, so they are archived, not carried.
 STATE_VERSION = 2
-DRAIN_TICKS = 3  # consecutive drained reads before a pool counts as pulled
+# Consecutive drained-liquidity reads (QUOTE_S apart) with the price intact
+# before the position is closed as "drained" at DRAINED_HAIRCUT of the quote.
+# A drained read with the price halving is a rug, closed at 30% at once.
+DRAIN_EXIT_TICKS = 12
+DRAINED_HAIRCUT = 0.85
 
 logger = logging.getLogger("trending")
 
@@ -307,6 +311,92 @@ SEEDS_V3 = [
     },
 ]
 
+# v4 hypotheses from the first v3 night (218 unique fills, 34 tokens): pools
+# up 30-100% on the day were the only positive h24 band, holds of 40+ minutes
+# were the only positive hold band, and quick stop-loss/flow-fade exits paid
+# the round trip for nothing. These test "moderately up on the day, calm 5m,
+# hold about an hour with a wide stop" across families.
+SEEDS_V4 = [
+    {
+        "family": "volume_leader",
+        "source": "volume",
+        "max_rank": 25,
+        "min_age_h": 12,
+        "max_age_h": 5_000,
+        "m5_min": -0.02,
+        "m5_max": 0.03,
+        "h1_min": -0.05,
+        "h1_max": 0.15,
+        "h6_min": -0.5,
+        "h24_min": 0.3,
+        "h24_max": 1.0,
+        "buy_ratio_min": 0.6,
+        "min_m5_vol": 1_000,
+        "min_m5_buyers": 0,
+        "pump_only": False,
+        "cooldown_min": 30,
+        "min_liq": 100_000,
+        "max_mcap": 200_000_000,
+        "tp": 0.25,
+        "sl": 0.25,
+        "use_trail": False,
+        "fade_exit": False,
+        "max_hold_min": 55,
+    },
+    {
+        "family": "momentum",
+        "source": "any",
+        "min_age_h": 12,
+        "max_age_h": 5_000,
+        "m5_min": -0.01,
+        "m5_max": 0.02,
+        "h1_min": 0.0,
+        "h1_max": 0.10,
+        "h6_min": -0.5,
+        "h24_min": 0.3,
+        "h24_max": 1.0,
+        "buy_ratio_min": 0.6,
+        "min_m5_vol": 1_000,
+        "min_m5_buyers": 0,
+        "pump_only": False,
+        "cooldown_min": 30,
+        "min_liq": 100_000,
+        "max_mcap": 200_000_000,
+        "tp": 0.30,
+        "sl": 0.20,
+        "use_trail": True,
+        "trail_act": 0.12,
+        "trail_dist": 0.06,
+        "fade_exit": False,
+        "max_hold_min": 100,
+    },
+    {
+        "family": "dip",
+        "source": "any",
+        "min_age_h": 12,
+        "max_age_h": 5_000,
+        "m5_min": -0.05,
+        "m5_max": -0.01,
+        "h1_min": 0.05,
+        "h1_max": 0.20,
+        "h6_min": -0.5,
+        "h24_min": 0.3,
+        "h24_max": 1.5,
+        "buy_ratio_min": 0.6,
+        "min_m5_vol": 1_000,
+        "min_m5_buyers": 0,
+        "pump_only": False,
+        "cooldown_min": 30,
+        "min_liq": 100_000,
+        "max_mcap": 200_000_000,
+        "tp": 0.15,
+        "sl": 0.20,
+        "use_trail": False,
+        "fade_exit": False,
+        "max_hold_min": 60,
+    },
+]
+
 SEEDS = [
     # Hand-built starting points, one or more per family; evolution takes over.
     {
@@ -435,8 +525,8 @@ class Engine:
 
     # ---------- population ----------
     def seed(self) -> None:
-        self.injected = ["v3"]
-        for spec in SEEDS + SEEDS_V2 + SEEDS_V3:
+        self.injected = ["v3", "v4"]
+        for spec in SEEDS + SEEDS_V2 + SEEDS_V3 + SEEDS_V4:
             s = random_strategy(self.rng, spec["family"])
             s.update(spec)
             repair(s)
@@ -512,8 +602,7 @@ class Engine:
                         "h6": rec["pc"].get("h6"),
                         "h24": rec["pc"]["h24"],
                         "bs5": round(
-                            rec["tx"]["m5"]["buys"]
-                            / max(rec["tx"]["m5"]["sells"], 1),
+                            rec["tx"]["m5"]["buys"] / max(rec["tx"]["m5"]["sells"], 1),
                             2,
                         ),
                         "liq": round(liq),
@@ -554,13 +643,17 @@ class Engine:
                 # pulls stay pulled, a one-off bad liquidity print does not.
                 low = 0 < fq["liq"] < 0.3 * p["liq0"]
                 p["drain_ticks"] = p.get("drain_ticks", 0) + 1 if low else 0
-                drained = low and (
-                    p["drain_ticks"] >= DRAIN_TICKS or price < 0.5 * p["last"]
-                )
+                crashed = price < 0.5 * p["last"] or price < 0.5 * p["entry"]
+                rugged = low and crashed
                 spiked = price > 3 * p["last"] and 0 < fq["liq"] < 0.5 * p["liq0"]
-                if drained or spiked:
-                    # Pool pulled: a drained pool's quoted price is not sellable.
+                if rugged or spiked:
+                    # Pool pulled and price collapsing: the quote is not sellable.
                     reason, px = "rug", min(price, p["last"]) * 0.3
+                elif low and p["drain_ticks"] >= DRAIN_EXIT_TICKS:
+                    # Liquidity reads drained but the price holds (seen on a
+                    # tokenized stock and on a pool that kept its price): sell
+                    # at the quote less a haircut for the thin book.
+                    reason, px = "drained", min(price, p["last"]) * DRAINED_HAIRCUT
                 elif price > 2.5 * p["last"] and p.get("spike_ticks", 0) < 2:
                     # A 2.5x jump inside one tick is almost always a bad print;
                     # believe it only once it has held for three ticks.
@@ -863,6 +956,8 @@ class Engine:
             s["stats"].setdefault("mints", {})
         if "v3" not in self.injected:
             self._inject("v3", SEEDS_V3)
+        if "v4" not in self.injected:
+            self._inject("v4", SEEDS_V4)
         now = time.time()
         self.cooldown = {k: v for k, v in self.cooldown.items() if v > now}
         return True
@@ -874,9 +969,7 @@ class Engine:
             self.strategies,
             key=lambda s: (s["id"] not in clones, score(s["stats"])),
         )
-        drop = {
-            s["id"] for s in ranked[: len(specs)] if s["id"] not in self.candidates
-        }
+        drop = {s["id"] for s in ranked[: len(specs)] if s["id"] not in self.candidates}
         for s in self.strategies:
             if s["id"] in drop:
                 self.retired.append(self._public(s) | {"retired": now_iso()})

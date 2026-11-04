@@ -28,6 +28,7 @@ RANGES: dict[str, tuple[float, float, str]] = {
     "h1_max": (0.05, 5.0, "log"),
     "h6_min": (-0.5, 2.0, "f"),
     "h24_min": (-0.9, 3.0, "f"),
+    "h24_max": (0.2, 20.0, "log"),
     "buy_ratio_min": (0.6, 1.8, "f"),
     "min_m5_vol": (500, 60_000, "log"),
     "min_m5_buyers": (0, 60, "i"),
@@ -48,6 +49,7 @@ LOOSE = {
     "max_age_h": 5_000.0,
     "h6_min": -0.5,
     "h24_min": -0.9,
+    "h24_max": 20.0,
     "min_m5_buyers": 0.0,
     "min_m5_vol": 500.0,
     "buy_ratio_min": 0.6,
@@ -76,6 +78,9 @@ def random_strategy(rng: random.Random, family: str | None = None) -> dict:
     s = {n: _sample(n, rng) for n in RANGES}
     for b in BOOLS:
         s[b] = rng.random() < 0.5
+    # Flow-fade exits cut positions after a few minutes at about 0% gross, so
+    # they mostly pay the round trip; keep the gene but start it rarer.
+    s["fade_exit"] = rng.random() < 0.2
     s["family"] = family or rng.choice(FAMILIES)
     s["source"] = rng.choice(SOURCES)
     # Ten random filters stacked would almost never all pass, so each optional
@@ -100,6 +105,7 @@ def _repair(s: dict) -> None:
     s["m5_max"] = max(s["m5_max"], s["m5_min"] + 0.01)
     s["h1_max"] = max(s["h1_max"], s["h1_min"] + 0.05)
     s["max_age_h"] = max(s["max_age_h"], s["min_age_h"] + 1)
+    s["h24_max"] = max(s["h24_max"], s["h24_min"] + 0.1)
     if s["family"] == "dip":
         # A dip buy needs an uptrend and a red 5 minutes.
         s["m5_max"] = min(s["m5_max"], 0.0)
@@ -173,7 +179,9 @@ def entry_signal(s: dict, rec: dict, prev_ranks: dict[str, int] | None) -> bool:
         return False
     if tx["buyers"] < s["min_m5_buyers"]:
         return False
-    if pc["h24"] < s["h24_min"] or pc.get("h6", 0.0) < s.get("h6_min", -0.5):
+    if not s["h24_min"] <= pc["h24"] <= s.get("h24_max", 20.0):
+        return False
+    if pc.get("h6", 0.0) < s.get("h6_min", -0.5):
         return False
     fam = s["family"]
     in_m5 = s["m5_min"] <= pc["m5"] <= s["m5_max"]
@@ -226,7 +234,7 @@ def exit_reason(
     if (
         s["fade_exit"]
         and flow
-        and held_min >= 2
+        and held_min >= 10
         and flow["sells_m5"] > flow["buys_m5"] * 1.3
         and flow["sells_m5"] >= 10
     ):
@@ -240,7 +248,7 @@ def describe(s: dict) -> str:
         f"liq>{s['min_liq'] / 1e3:.0f}k mcap<{s['max_mcap'] / 1e6:.1f}M",
         f"age {s['min_age_h']:.0f}-{s['max_age_h']:.0f}h",
         f"m5 {s['m5_min']:+.0%}..{s['m5_max']:+.0%} h1 {s['h1_min']:+.0%}..{s['h1_max']:+.0%}",
-        f"h6>{s.get('h6_min', -0.5):+.0%} h24>{s['h24_min']:+.0%}",
+        f"h6>{s.get('h6_min', -0.5):+.0%} h24 {s['h24_min']:+.0%}..{s.get('h24_max', 20.0):+.0%}",
         f"b/s>{s['buy_ratio_min']:.2f} vol5m>{s['min_m5_vol'] / 1e3:.1f}k",
         f"TP {s['tp']:.0%} SL {s['sl']:.0%}",
     ]
