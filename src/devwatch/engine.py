@@ -1,0 +1,787 @@
+"""Paper test: do the devs behind top pump.fun coins launch winners again?
+
+1. Watchlist (every few hours): creators of the top pump.fun coins by volume on
+   GeckoTerminal, read on chain from each coin's pool or curve account, and the
+   wallet that first funded each creator.
+2. Linked wallets: every watched creator or funder is followed with
+   ``logsSubscribe``; a SOL transfer from one of them to a new wallet marks that
+   wallet as linked for a week (devs launch again from fresh wallets).
+3. Launches: PumpPortal's free create stream. A create by a watched creator,
+   a watched funder, or a linked wallet is a signal; one random ordinary launch
+   every few minutes is a control, tracked the same way.
+4. Paper trade: 0.2 SOL bought on the curve ~2 s after the create (fees,
+   latency and curve price impact included), marked to its sell value on the
+   curve, or via Jupiter once graduated, for an hour. Several exit rules are
+   scored on the same price path.
+
+Moves no funds and never loads a wallet. Run ``python -m devwatch.engine`` from
+``src/``. Env: DEVWATCH_DATA_DIR, SOLANA_NODE_RPC_ENDPOINT / _WSS_ENDPOINT
+(optional; the public endpoint is tried first to spare the plan's quota).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import csv
+import json
+import logging
+import logging.handlers
+import os
+import random
+import statistics
+import struct
+import sys
+import time
+import urllib.error
+import urllib.request
+from collections import Counter, defaultdict
+from datetime import UTC, datetime
+from pathlib import Path
+
+from trending import feeds
+
+DATA = Path(os.environ.get("DEVWATCH_DATA_DIR", "trades/devwatch"))
+SIZE_SOL = float(os.environ.get("PAPER_SIZE_SOL", "0.2"))
+PUBLIC_RPC = "https://api.mainnet-beta.solana.com"
+PUBLIC_WSS = "wss://api.mainnet-beta.solana.com"
+PUMPPORTAL = "wss://pumpportal.fun/api/data"
+SOL_MINT = "So11111111111111111111111111111111111111112"
+DEFAULT_KEY = "11111111111111111111111111111111"
+
+CURVE_FEE = 0.0125  # pump.fun protocol + creator fee per side
+LATENCY = 0.01  # price moving against us between signal and fill, per side
+GRAD_SIDE = 0.01  # per-side cost once trading on PumpSwap
+ENTRY_DELAY = 2.0  # seconds from create to our simulated buy
+TRACK_SECONDS = 3600
+CONTROL_EVERY = 240  # seconds between random control launches
+REFRESH_HOURS = 6
+TOP_PAGES = 8  # 20 pools per page
+MIN_TOP_MCAP = 300_000
+MAX_CREATORS = 150
+MAX_FUNDERS = 100
+LINK_DAYS = 7
+MIN_LINK_SOL = 0.05
+HUB_TRANSFERS_PER_DAY = 25
+
+# Exit rules scored on every price path: (name, take profit, stop loss, trail
+# activate, trail distance, max hold seconds). Multiples are of the stake.
+VARIANTS = [
+    ("quick", 0.25, 0.15, None, None, 180),
+    ("tp50", 0.50, 0.30, None, None, 600),
+    ("tp100", 1.00, 0.40, None, None, 1800),
+    ("tp200", 2.00, 0.50, None, None, 3600),
+    ("trail", None, 0.35, 0.30, 0.20, 3600),
+    ("hold60", None, None, None, None, 3600),
+]
+
+EXCHANGES = {
+    "5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9",
+    "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM",
+    "2ojv9BAiHUrvsm9gxDe7fJSzbNZSJcxZvf8dqmWGHG8S",
+    "H8sMJSCQxfKiFTCfDR3DUMLPwcRbM61LGFJ8N4dK3WjS",
+    "GJRs4FwHtemZ5ZE9x3FNvJ8TMwitKTh21yxdRPqn7npE",
+    "2AQdpHJ2JpcEgPiATUXjQxA8QmafFegfQwSLWSprPicm",
+    "AC5RDfQFmDS1deWZos921JfqscXdByf8BKHs5ACWjtW2",
+    "5VCwKtCXgCJ6kit5FybXjvriW3xELsFDhYrPSqtJNmcD",
+    "is6MTRHEgyFLNTfYcuV4QBWLjrZBfmhVNYR6ccgr8KV",
+    "FWznbcNXWQuHTawe9RxvQ2LdCENssh12dsznf4RiouN5",
+    "BmFdpraQhkiDQE6SnfG5omcA1VwzqfXrwtNYBwWTymy6",
+    "G2YxRa6wt1qePMwfJzdXZG62ej4qaTC7YURzuh2Lwd3t",
+    "ASTyfSima4LLAdDgoFGkgqoKowG1LZFDr9fAQrg7iaJZ",
+    "u6PJ8DtQuPFnfmwHbGFULQ4u4EgjDiyYKjVEsynXq2w",
+}
+
+logger = logging.getLogger("devwatch")
+
+# ---------------------------------------------------------------- base58
+_B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+
+
+def b58encode(b: bytes) -> str:
+    n = int.from_bytes(b, "big")
+    out = ""
+    while n:
+        n, r = divmod(n, 58)
+        out = _B58[r] + out
+    return "1" * (len(b) - len(b.lstrip(b"\0"))) + out
+
+
+# ---------------------------------------------------------------- account decoding
+CURVE_DISC = bytes([23, 183, 248, 55, 96, 216, 172, 96])
+POOL_DISC = bytes([241, 154, 109, 4, 17, 177, 109, 188])
+
+
+def decode_curve(data: bytes) -> dict | None:
+    """pump.fun BondingCurve: reserves (raw units), complete, creator, quote mint."""
+    if len(data) < 115 or data[:8] != CURVE_DISC:
+        return None
+    vt, vq, rt, rq, supply = struct.unpack_from("<5Q", data, 8)
+    return {
+        "vt": vt,
+        "vq": vq,
+        "complete": bool(data[48]),
+        "creator": b58encode(data[49:81]),
+        "quote_mint": b58encode(data[83:115]),
+    }
+
+
+def pool_coin_creator(data: bytes) -> str | None:
+    """PumpSwap Pool.coin_creator, or None if not a canonical pump.fun pool."""
+    if len(data) < 243 or data[:8] != POOL_DISC:
+        return None
+    c = b58encode(data[211:243])
+    return None if c == DEFAULT_KEY else c
+
+
+def creator_from_account(data: bytes) -> str | None:
+    cur = decode_curve(data)
+    return cur["creator"] if cur else pool_coin_creator(data)
+
+
+# ---------------------------------------------------------------- curve math
+def curve_buy_tokens(vt: int, vq: int, lamports_in: float) -> float:
+    net = lamports_in * (1 - CURVE_FEE)
+    return (vt - vt * vq / (vq + net)) * (1 - LATENCY)
+
+
+def curve_sell_lamports(vt: int, vq: int, tokens: float) -> float:
+    out = vq - vt * vq / (vt + tokens)
+    return out * (1 - CURVE_FEE) * (1 - LATENCY)
+
+
+class Path_:
+    """A tracked launch: stake value multiple over time and per-variant exits."""
+
+    def __init__(self, kind: str, meta: dict) -> None:
+        self.kind, self.meta = kind, meta
+        self.t0 = time.time()
+        self.mults: list[tuple[float, float]] = []
+        self.peak = 0.0
+        self.exits: dict[str, tuple[str, float, float]] = {}
+
+    def mark(self, mult: float) -> None:
+        el = time.time() - self.t0
+        self.mults.append((el, mult))
+        self.peak = max(self.peak, mult)
+        for name, tp, sl, act, dist, hold in VARIANTS:
+            if name in self.exits:
+                continue
+            r = mult - 1
+            why = None
+            if tp is not None and r >= tp:
+                why, val = "tp", 1 + tp  # a limit fill at target, never above
+            elif sl is not None and r <= -sl:
+                why, val = "sl", mult
+            elif (
+                act is not None
+                and self.peak - 1 >= act
+                and mult <= self.peak * (1 - dist)
+            ):
+                why, val = "trail", mult
+            elif el >= hold:
+                why, val = "time", mult
+            if why:
+                self.exits[name] = (why, val - 1, el)
+
+    def finish(self) -> None:
+        last = self.mults[-1][1] if self.mults else 0.0
+        el = time.time() - self.t0
+        for name, *_ in VARIANTS:
+            self.exits.setdefault(name, ("end", last - 1, el))
+
+    def at(self, sec: float) -> float | None:
+        best = None
+        for el, m in self.mults:
+            if el <= sec:
+                best = m
+        return best
+
+
+# ---------------------------------------------------------------- RPC
+class Rpc:
+    """JSON-RPC over urllib in a thread; public endpoint first, plan endpoint on failure."""
+
+    def __init__(self) -> None:
+        plan = os.environ.get("SOLANA_NODE_RPC_ENDPOINT")
+        self.urls = [PUBLIC_RPC] + ([plan] if plan else [])
+        self.gate = asyncio.Semaphore(4)
+        self.calls = Counter()
+
+    def _post(self, url: str, body: bytes) -> dict | None:
+        req = urllib.request.Request(
+            url, data=body, headers={"Content-Type": "application/json"}
+        )
+        with urllib.request.urlopen(req, timeout=10) as r:  # noqa: S310
+            return json.loads(r.read().decode())
+
+    async def call(self, method: str, params: list) -> object:
+        body = json.dumps(
+            {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
+        ).encode()
+        async with self.gate:
+            for i, url in enumerate(self.urls):
+                try:
+                    doc = await asyncio.to_thread(self._post, url, body)
+                    self.calls["public" if i == 0 else "plan"] += 1
+                    if doc and "error" not in doc:
+                        return doc.get("result")
+                except (urllib.error.URLError, TimeoutError, ValueError, OSError):
+                    pass
+                await asyncio.sleep(0.3)
+        return None
+
+    async def account(self, address: str) -> bytes | None:
+        res = await self.call(
+            "getAccountInfo",
+            [address, {"encoding": "base64", "commitment": "confirmed"}],
+        )
+        try:
+            return base64.b64decode(res["value"]["data"][0])  # type: ignore[index]
+        except (TypeError, KeyError, IndexError, ValueError):
+            return None
+
+    async def tx(self, sig: str) -> dict | None:
+        res = await self.call(
+            "getTransaction",
+            [
+                sig,
+                {
+                    "encoding": "jsonParsed",
+                    "commitment": "confirmed",
+                    "maxSupportedTransactionVersion": 1,
+                },
+            ],
+        )
+        return res if isinstance(res, dict) else None
+
+
+def system_transfers(tx: dict | None) -> list[tuple[str, str, float]]:
+    """(source, destination, SOL) of every successful system transfer in a parsed tx."""
+    if not tx or (tx.get("meta") or {}).get("err") is not None:
+        return []
+    ixs = list(
+        (tx.get("transaction") or {}).get("message", {}).get("instructions") or []
+    )
+    for g in (tx.get("meta") or {}).get("innerInstructions") or []:
+        ixs += g.get("instructions") or []
+    out = []
+    for ix in ixs:
+        p = ix.get("parsed")
+        if ix.get("program") != "system" or not isinstance(p, dict):
+            continue
+        if p.get("type") not in ("transfer", "transferWithSeed"):
+            continue
+        info = p.get("info") or {}
+        out.append(
+            (
+                info.get("source"),
+                info.get("destination"),
+                int(info.get("lamports") or 0) / 1e9,
+            )
+        )
+    return out
+
+
+def now_iso() -> str:
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# ---------------------------------------------------------------- engine
+class DevWatch:
+    def __init__(self, rpc: Rpc) -> None:
+        self.rpc = rpc
+        self.coins: dict[str, dict] = {}  # mint -> {symbol, pool, creator, mcap}
+        self.creators: dict[str, dict] = {}  # wallet -> {coins, best_mcap, funder}
+        self.funders: dict[str, dict] = {}  # wallet -> {creators}
+        self.linked: dict[str, dict] = {}  # wallet -> {via, via_kind, at, sol}
+        self.hubs: set[str] = set()
+        self.transfers_today: Counter = Counter()
+        self.day = datetime.now(UTC).date().isoformat()
+        self.seen_sigs: set[str] = set()
+        self.tx_queue: asyncio.Queue = asyncio.Queue(maxsize=500)
+        self.open: list[Path_] = []
+        self.done: list[dict] = []
+        self.stats = Counter()
+        self.last_control = 0.0
+        self.watch_version = 0
+        self.sol_usd = 150.0
+        self.started = now_iso()
+
+    # ----- persistence
+    def save(self) -> None:
+        state = {
+            k: getattr(self, k)
+            for k in ("coins", "creators", "funders", "linked", "started")
+        }
+        state["hubs"] = sorted(self.hubs)
+        state["stats"] = dict(self.stats)
+        tmp = DATA / "state.json.tmp"
+        tmp.write_text(json.dumps(state))
+        tmp.replace(DATA / "state.json")
+        (DATA / "report.txt").write_text(self.report() + "\n")
+
+    def load(self) -> None:
+        p = DATA / "state.json"
+        if p.exists():
+            try:
+                st = json.loads(p.read_text())
+                for k in ("coins", "creators", "funders", "linked", "started"):
+                    setattr(self, k, st.get(k, getattr(self, k)))
+                self.hubs = set(st.get("hubs", []))
+                self.stats = Counter(st.get("stats", {}))
+            except (OSError, ValueError) as e:
+                logger.warning(f"state unreadable ({e}); fresh start")
+        rp = DATA / "results.csv"
+        if rp.exists():
+            with rp.open() as f:
+                self.done = [r for r in csv.DictReader(f)]
+
+    # ----- watchlist
+    def watched(self) -> dict[str, str]:
+        """Wallets to follow on chain -> 'creator' or 'funder'."""
+        cs = sorted(
+            (c for c in self.creators if c not in self.hubs),
+            key=lambda c: -self.creators[c]["best_mcap"],
+        )[:MAX_CREATORS]
+        fs = sorted(
+            (f for f in self.funders if f not in self.hubs),
+            key=lambda f: -len(self.funders[f]["creators"]),
+        )[:MAX_FUNDERS]
+        out = {f: "funder" for f in fs}
+        out.update({c: "creator" for c in cs})
+        return out
+
+    async def refresh_watchlist(self) -> None:
+        pools: list[dict] = []
+        for dex in ("pumpswap", "pump-fun"):
+            for page in range(1, TOP_PAGES + 1):
+                url = f"{feeds.GT}/networks/solana/dexes/{dex}/pools?sort=h24_volume_usd_desc&page={page}"
+                doc = await asyncio.to_thread(
+                    feeds.get_json, url, feeds.GT_GATE, feeds.GT_HDR
+                )
+                for p in (doc or {}).get("data") or []:
+                    rec = feeds._parse_gt_pool(p)  # noqa: SLF001
+                    if (
+                        rec
+                        and rec["mint"].endswith("pump")
+                        and rec["mcap"] >= MIN_TOP_MCAP
+                    ):
+                        pools.append(rec)
+                if dex == "pump-fun" and page >= 2:
+                    break
+        new_creators = []
+        for rec in pools:
+            coin = self.coins.get(rec["mint"])
+            if coin:
+                coin["mcap"] = max(coin["mcap"], rec["mcap"])
+                if coin["creator"] in self.creators:
+                    c = self.creators[coin["creator"]]
+                    c["best_mcap"] = max(c["best_mcap"], coin["mcap"])
+                continue
+            data = await self.rpc.account(rec["pool"])
+            creator = creator_from_account(data) if data else None
+            if not creator or creator in EXCHANGES:
+                continue
+            self.coins[rec["mint"]] = {
+                "symbol": rec["symbol"],
+                "pool": rec["pool"],
+                "creator": creator,
+                "mcap": rec["mcap"],
+                "seen": now_iso(),
+            }
+            c = self.creators.setdefault(
+                creator, {"coins": [], "best_mcap": 0, "funder": None}
+            )
+            c["coins"].append(rec["mint"])
+            c["best_mcap"] = max(c["best_mcap"], rec["mcap"])
+            if len(c["coins"]) > 8:
+                self.hubs.add(creator)  # a program/fee address, not a person
+            if c["funder"] is None:
+                new_creators.append(creator)
+        for creator in new_creators:
+            funder = await self.trace_funder(creator)
+            self.creators[creator]["funder"] = funder or ""
+            if funder and funder not in EXCHANGES:
+                self.funders.setdefault(funder, {"creators": []})["creators"].append(
+                    creator
+                )
+        self.watch_version += 1
+        w = self.watched()
+        logger.warning(
+            f"[watchlist] {len(pools)} top pump coins, {len(self.coins)} known, "
+            f"{len(self.creators)} creators, {len(self.funders)} funders, "
+            f"watching {len(w)} wallets, {len(self.linked)} linked, {len(self.hubs)} hubs"
+        )
+
+    async def trace_funder(self, wallet: str) -> str | None:
+        """The wallet that sent ``wallet`` its first real SOL, from its oldest txs."""
+        sigs = await self.rpc.call("getSignaturesForAddress", [wallet, {"limit": 1000}])
+        if not isinstance(sigs, list) or not sigs or len(sigs) >= 1000:
+            return None  # too busy to reach its first funding in one page
+        for s in reversed(sigs[-6:]):
+            if s.get("err") is not None:
+                continue
+            for src, dst, sol in system_transfers(await self.rpc.tx(s["signature"])):
+                if dst == wallet and sol >= 0.01 and src != wallet:
+                    return src
+        return None
+
+    # ----- linked wallets
+    async def logs_loop(self, websockets) -> None:  # noqa: ANN001
+        url = os.environ.get("SOLANA_NODE_WSS_ENDPOINT") or PUBLIC_WSS
+        while True:
+            w = self.watched()
+            version = self.watch_version
+            if not w:
+                await asyncio.sleep(30)
+                continue
+            try:
+                async with websockets.connect(
+                    url, ping_interval=20, max_size=2**22
+                ) as ws:
+                    subs: dict[int, str] = {}
+                    reqs: dict[int, str] = {}
+                    for i, wallet in enumerate(w, start=1):
+                        reqs[i] = wallet
+                        await ws.send(
+                            json.dumps(
+                                {
+                                    "jsonrpc": "2.0",
+                                    "id": i,
+                                    "method": "logsSubscribe",
+                                    "params": [
+                                        {"mentions": [wallet]},
+                                        {"commitment": "confirmed"},
+                                    ],
+                                }
+                            )
+                        )
+                    logger.info(f"[logs] subscribing to {len(w)} wallets")
+                    async for raw in ws:
+                        msg = json.loads(raw)
+                        if "id" in msg and "result" in msg and msg["id"] in reqs:
+                            subs[msg["result"]] = reqs[msg["id"]]
+                            continue
+                        params = msg.get("params") or {}
+                        val = (params.get("result") or {}).get("value") or {}
+                        wallet = subs.get(params.get("subscription"))
+                        sig = val.get("signature")
+                        if (
+                            wallet
+                            and sig
+                            and val.get("err") is None
+                            and sig not in self.seen_sigs
+                        ):
+                            self.seen_sigs.add(sig)
+                            if self.tx_queue.full():
+                                self.tx_queue.get_nowait()
+                            self.tx_queue.put_nowait((wallet, sig))
+                        if self.watch_version != version:
+                            break  # watchlist changed: resubscribe
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"[logs] connection error: {type(e).__name__} {e}")
+                await asyncio.sleep(10)
+            if len(self.seen_sigs) > 50_000:
+                self.seen_sigs.clear()
+
+    async def tx_worker(self) -> None:
+        while True:
+            wallet, sig = await self.tx_queue.get()
+            today = datetime.now(UTC).date().isoformat()
+            if today != self.day:
+                self.day, self.transfers_today = today, Counter()
+            watched = self.watched()
+            for src, dst, sol in system_transfers(await self.rpc.tx(sig)):
+                if src != wallet or src not in watched or sol < MIN_LINK_SOL:
+                    continue
+                if dst in watched or dst in EXCHANGES or dst == src:
+                    continue
+                self.transfers_today[src] += 1
+                if self.transfers_today[src] > HUB_TRANSFERS_PER_DAY:
+                    if src not in self.hubs:
+                        self.hubs.add(src)
+                        self.watch_version += 1
+                        logger.warning(
+                            f"[logs] {src[:8]} funds too many wallets; treated as a service"
+                        )
+                    continue
+                self.linked[dst] = {
+                    "via": src,
+                    "via_kind": watched[src],
+                    "at": time.time(),
+                    "sol": round(sol, 3),
+                }
+                self.stats["links"] += 1
+                logger.info(
+                    f"[link] {watched[src]} {src[:8]} sent {sol:.2f} SOL to {dst[:8]}"
+                )
+            cutoff = time.time() - LINK_DAYS * 86400
+            if len(self.linked) > 5000 or random.random() < 0.01:
+                self.linked = {k: v for k, v in self.linked.items() if v["at"] > cutoff}
+            await asyncio.sleep(0.3)
+
+    # ----- launches
+    def classify(self, creator: str) -> tuple[str, dict] | None:
+        if creator in self.hubs:
+            return None
+        if creator in self.creators:
+            c = self.creators[creator]
+            return "same_dev", {"source_mcap": c["best_mcap"], "via": creator}
+        if creator in self.funders:
+            return "funder_launch", {"via": creator}
+        link = self.linked.get(creator)
+        if link and link["at"] > time.time() - LINK_DAYS * 86400:
+            via = link["via"]
+            mcap = self.creators.get(via, {}).get("best_mcap", 0)
+            kind = (
+                "dev_new_wallet"
+                if link["via_kind"] == "creator"
+                else "funder_new_wallet"
+            )
+            return kind, {"via": via, "source_mcap": mcap, "link_sol": link["sol"]}
+        return None
+
+    async def pumpportal_loop(self, websockets) -> None:  # noqa: ANN001
+        while True:
+            try:
+                async with websockets.connect(PUMPPORTAL, ping_interval=20) as ws:
+                    await ws.send(json.dumps({"method": "subscribeNewToken"}))
+                    logger.info("[pumpportal] connected")
+                    async for raw in ws:
+                        try:
+                            msg = json.loads(raw)
+                        except ValueError:
+                            continue
+                        if not isinstance(msg, dict) or msg.get("txType") != "create":
+                            continue
+                        if msg.get("pool", "pump") != "pump":
+                            continue
+                        self.stats["launches"] += 1
+                        creator = str(msg.get("traderPublicKey") or "")
+                        hit = self.classify(creator)
+                        meta = {
+                            "mint": msg.get("mint"),
+                            "symbol": str(msg.get("symbol", ""))[:16],
+                            "creator": creator,
+                            "curve": msg.get("bondingCurveKey"),
+                            "dev_buy_sol": msg.get("solAmount"),
+                        }
+                        if hit:
+                            kind, extra = hit
+                            self.stats[f"signal_{kind}"] += 1
+                            logger.warning(
+                                f"[signal] {kind} {meta['symbol']} {meta['mint']} by {creator[:8]} {extra}"
+                            )
+                            asyncio.create_task(self.track(kind, meta | extra))
+                        elif time.time() - self.last_control >= CONTROL_EVERY:
+                            self.last_control = time.time()
+                            asyncio.create_task(self.track("control", meta))
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"[pumpportal] {type(e).__name__} {e}; reconnecting")
+            await asyncio.sleep(3)
+
+    async def track(self, kind: str, meta: dict) -> None:
+        """Paper-buy one launch and follow its value for an hour."""
+        curve_addr, mint = meta.get("curve"), meta.get("mint")
+        if not curve_addr or not mint:
+            return
+        await asyncio.sleep(ENTRY_DELAY)
+        data = await self.rpc.account(curve_addr)
+        cur = decode_curve(data) if data else None
+        if (
+            not cur
+            or cur["complete"]
+            or cur["quote_mint"] not in (SOL_MINT, DEFAULT_KEY)
+        ):
+            self.stats["unfillable"] += 1
+            return
+        stake = SIZE_SOL * 1e9
+        tokens = curve_buy_tokens(cur["vt"], cur["vq"], stake)
+        if tokens <= 0:
+            return
+        path = Path_(kind, meta | {"entry_vq_sol": round(cur["vq"] / 1e9, 2)})
+        self.open.append(path)
+        fails = 0
+        last_val = curve_sell_lamports(cur["vt"], cur["vq"], tokens)
+        path.mark(last_val / stake)
+        token_raw_per_ui = 1e6
+        while time.time() - path.t0 < TRACK_SECONDS and len(path.exits) < len(VARIANTS):
+            el = time.time() - path.t0
+            await asyncio.sleep(4 if el < 600 else 15)
+            data = await self.rpc.account(curve_addr)
+            cur = decode_curve(data) if data else None
+            if cur and not cur["complete"] and cur["vt"] > 0:
+                val = curve_sell_lamports(cur["vt"], cur["vq"], tokens)
+            elif cur and cur["complete"]:
+                px = (await asyncio.to_thread(feeds.jup_prices, [mint])).get(mint)
+                if not px:
+                    fails += 1
+                    if fails > 40:
+                        break
+                    continue
+                val = (
+                    tokens
+                    / token_raw_per_ui
+                    * px
+                    / self.sol_usd
+                    * 1e9
+                    * (1 - GRAD_SIDE)
+                )
+                path.meta["graduated"] = True
+            else:
+                fails += 1
+                if fails > 40:
+                    break
+                continue
+            fails = 0
+            last_val = val
+            path.mark(val / stake)
+        path.finish()
+        self.open.remove(path)
+        self.record(path)
+
+    def record(self, p: Path_) -> None:
+        row = {
+            "time_utc": now_iso(),
+            "kind": p.kind,
+            "symbol": p.meta.get("symbol"),
+            "mint": p.meta.get("mint"),
+            "creator": p.meta.get("creator"),
+            "via": p.meta.get("via", ""),
+            "source_mcap": round(p.meta.get("source_mcap", 0) or 0),
+            "graduated": bool(p.meta.get("graduated")),
+            "peak_mult": round(p.peak, 3),
+        }
+        for sec, name in ((300, "m5"), (900, "m15"), (1800, "m30"), (3600, "m60")):
+            v = p.at(sec)
+            row[f"mult_{name}"] = round(v, 3) if v is not None else ""
+        for name, *_ in VARIANTS:
+            why, net, el = p.exits[name]
+            row[f"{name}_net"] = round(net, 4)
+            row[f"{name}_why"] = why
+        path = DATA / "results.csv"
+        new = not path.exists()
+        with path.open("a", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=list(row))
+            if new:
+                w.writeheader()
+            w.writerow(row)
+        self.done.append({k: str(v) for k, v in row.items()})
+        logger.info(
+            f"[result] {p.kind} {row['symbol']} peak x{p.peak:.2f} "
+            + " ".join(f"{n}={p.exits[n][1]:+.0%}" for n, *_ in VARIANTS)
+        )
+
+    # ----- reporting
+    def report(self) -> str:
+        w = self.watched()
+        lines = [
+            f"Dev/funder watch (paper)  {now_iso()}  started {self.started}",
+            f"watchlist: {len(self.coins)} top coins, {len(self.creators)} creators, "
+            f"{len(self.funders)} funders; following {sum(v == 'creator' for v in w.values())} creators + "
+            f"{sum(v == 'funder' for v in w.values())} funders; {len(self.linked)} linked wallets; "
+            f"{len(self.hubs)} hubs excluded",
+            f"counts: {dict(self.stats)}  open: {len(self.open)}  rpc calls: {dict(self.rpc.calls)}",
+            "",
+        ]
+        by = defaultdict(list)
+        for r in self.done:
+            by[r["kind"]].append(r)
+        lines.append(
+            f"Results per launch type, net per trade after costs ({SIZE_SOL} SOL paper stake):"
+        )
+        hdr = "  type               n   peak>2x  grad  " + "  ".join(
+            f"{n:>7}" for n, *_ in VARIANTS
+        )
+        lines.append(hdr)
+        for kind in (
+            "same_dev",
+            "dev_new_wallet",
+            "funder_launch",
+            "funder_new_wallet",
+            "control",
+        ):
+            rs = by.get(kind, [])
+            if not rs:
+                continue
+            cells = []
+            for name, *_ in VARIANTS:
+                vals = [float(r[f"{name}_net"]) for r in rs]
+                cells.append(f"{statistics.mean(vals):+7.1%}")
+            p2 = sum(float(r["peak_mult"]) >= 2 for r in rs) / len(rs)
+            gr = sum(r["graduated"] in ("True", True) for r in rs) / len(rs)
+            lines.append(
+                f"  {kind:17} {len(rs):3}   {p2:6.0%}  {gr:4.0%}  " + "  ".join(cells)
+            )
+        sig = [r for r in self.done if r["kind"] != "control"]
+        if sig:
+            lines.append("\nRecent signals:")
+            for r in sig[-12:]:
+                lines.append(
+                    f"  {r['time_utc']} {r['kind']:17} {r['symbol']:10} peak x{float(r['peak_mult']):.2f} "
+                    f"m15 {r['mult_m15'] or '-'} via {str(r['via'])[:8]} src mcap ${int(float(r['source_mcap'] or 0)):,}"
+                )
+        return "\n".join(lines)
+
+
+async def amain() -> None:
+    import websockets  # noqa: PLC0415  (only on the Fly image / Actions)
+
+    DATA.mkdir(parents=True, exist_ok=True)
+    fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    fh = logging.handlers.RotatingFileHandler(
+        DATA / "engine.log", maxBytes=20_000_000, backupCount=3
+    )
+    for h in (logging.StreamHandler(sys.stdout), fh):
+        h.setFormatter(fmt)
+        root.addHandler(h)
+    for noisy in ("websockets", "asyncio"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
+    dw = DevWatch(Rpc())
+    dw.load()
+    logger.info(
+        f"devwatch starting: {len(dw.creators)} creators known, {len(dw.done)} results"
+    )
+
+    async def refresher() -> None:
+        while True:
+            try:
+                px = await asyncio.to_thread(feeds.sol_usd)
+                if px:
+                    dw.sol_usd = px
+                await dw.refresh_watchlist()
+            except Exception:  # noqa: BLE001
+                logger.exception("[watchlist] refresh failed")
+            await asyncio.sleep(REFRESH_HOURS * 3600)
+
+    async def saver() -> None:
+        while True:
+            await asyncio.sleep(120)
+            try:
+                dw.save()
+                logger.info(
+                    f"[status] launches {dw.stats['launches']} open {len(dw.open)} "
+                    f"results {len(dw.done)} links {len(dw.linked)}"
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("save failed")
+
+    await asyncio.gather(
+        refresher(),
+        saver(),
+        dw.logs_loop(websockets),
+        dw.tx_worker(),
+        dw.pumpportal_loop(websockets),
+    )
+
+
+def main() -> None:
+    asyncio.run(amain())
+
+
+if __name__ == "__main__":
+    main()

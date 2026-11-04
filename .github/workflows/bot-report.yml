@@ -53,3 +53,7 @@ jobs:
         if: env.FLY_API_TOKEN != ''
         run: |
           flyctl ssh console -a "$APP" -C "cat /data/trades/trending/trades.csv" || true
+      - name: Dev watch - report, log highlights and results
+        if: env.FLY_API_TOKEN != ''
+        run: |
+          flyctl ssh console -a "$APP" -C "sh -c 'cat /data/trades/devwatch/report.txt; echo === LOG; grep -a -E \"WARNING|ERROR|status|watchlist|signal\" /data/trades/devwatch/engine.log | tail -80; echo === RESULTS; cat /data/trades/devwatch/results.csv'" || true

@@ -17,13 +17,14 @@ primary_region = "ewr"
 
 [env]
   TRENDING_DATA_DIR = "/data/trades/trending"
+  DEVWATCH_DATA_DIR = "/data/trades/devwatch"
   PAPER_SIZE_SOL = "0.2"
 
-# Paper-only trending/top-volume strategy engine (src/trending). Spends no SOL
-# and never loads the wallet. To go back to the new-coin sniper, use:
+# Two paper-only testers (src/trending, src/devwatch); if either exits, the
+# machine restarts both. Neither spends SOL or loads the wallet. To go back to the new-coin sniper, use:
 #   app = "sh -c 'mkdir -p /data/trades /data/logs && exec uv run --no-sync pump_bot'"
 [processes]
-  app = "sh -c 'mkdir -p /data/trades/trending /data/logs && cd /app/src && exec /app/.venv/bin/python -m trending.engine'"
+  app = "bash -c 'mkdir -p /data/trades/trending /data/trades/devwatch /data/logs && cd /app/src && /app/.venv/bin/python -m trending.engine & cd /app/src && /app/.venv/bin/python -m devwatch.engine & wait -n; exit 1'"
 
 # The bot exits with code 0 if its trading process stops, and Fly's default
 # (on-failure) does not restart on code 0. Always restart instead.

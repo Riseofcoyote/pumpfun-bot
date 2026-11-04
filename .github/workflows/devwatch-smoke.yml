@@ -1,0 +1,31 @@
+# Runs the dev/funder watch paper tester for a few minutes against live data
+# (public RPC). Moves no funds and uses no secrets.
+name: Dev watch smoke test
+on:
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: "How long to run"
+        default: "10"
+permissions:
+  contents: read
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -q websockets
+      - name: Run
+        working-directory: src
+        env:
+          DEVWATCH_DATA_DIR: /tmp/devwatch
+        run: timeout ${{ inputs.minutes }}m python -m devwatch.engine || true
+      - name: Results
+        run: |
+          cat /tmp/devwatch/report.txt || true
+          echo "=== log"; grep -a -v "\[result\] control" /tmp/devwatch/engine.log | tail -80
+          echo "=== state sizes"; python -c "import json;s=json.load(open('/tmp/devwatch/state.json'));print({k:len(v) if hasattr(v,'__len__') else v for k,v in s.items()})" || true
