@@ -67,7 +67,12 @@ SIZE_SOL = float(os.environ.get("PAPER_SIZE_SOL", "0.2"))
 SOLBOT_URL = os.environ.get("SOLBOT_URL", "https://rock-solana-paper-bot.fly.dev").rstrip("/")
 SOLBOT_TOKEN = os.environ.get("SOLBOT_TOKEN", "")
 PUMPPORTAL = "wss://pumpportal.fun/api/data"
+PUMPPORTAL_KEY = os.environ.get("PUMPPORTAL_API_KEY", "")  # funded key unlocks account trades
 PUMP_PROGRAM = "6EF8rrecthR5Dzon8Nwu78hRvfCKubJ14M5uBEwF6P"
+PUMPSWAP_PROGRAM = "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA"
+PUBLIC_WSS = "wss://api.mainnet-beta.solana.com"
+WALLETS_PER_SOCKET = 200
+QUOTE_MINTS = {SOL_MINT, "EPjFWdd5AufqSMqeM2qzyBK72uozdbq7rpWYD58sXG3u"}
 
 ENTRY_DELAY = 2.0
 LATE_DELAY = 60.0
@@ -158,6 +163,39 @@ def http_json(url: str, token: str = "", body: dict | None = None) -> dict | Non
         return {"_error": type(e).__name__}
 
 
+def wallet_swaps(tx: dict | None, wallet: str) -> list[tuple[str, str, float | None]]:
+    """(mint, "buy"|"sell", SOL moved) for each token the wallet's balance changed in.
+
+    SOL moved is the wallet's lamport change (fees included); None when the
+    wallet is not among the account keys.
+    """
+    meta = (tx or {}).get("meta") or {}
+    if not tx or meta.get("err") is not None:
+        return []
+    delta: dict[str, float] = defaultdict(float)
+    for sign, key in ((-1, "preTokenBalances"), (1, "postTokenBalances")):
+        for b in meta.get(key) or []:
+            if b.get("owner") != wallet:
+                continue
+            amt = float((b.get("uiTokenAmount") or {}).get("uiAmount") or 0)
+            delta[b.get("mint")] += sign * amt
+    keys = ((tx.get("transaction") or {}).get("message") or {}).get("accountKeys") or []
+    sol = None
+    for i, k in enumerate(keys):
+        if (k.get("pubkey") if isinstance(k, dict) else k) == wallet:
+            try:
+                sol = abs(meta["postBalances"][i] - meta["preBalances"][i]) / 1e9
+            except (KeyError, IndexError, TypeError):
+                sol = None
+            break
+    out = []
+    for mint, d in delta.items():
+        if not mint or mint in QUOTE_MINTS or abs(d) <= 0:
+            continue
+        out.append((mint, "buy" if d > 0 else "sell", sol))
+    return out
+
+
 class KolWatch:
     def __init__(self, rpc: Rpc) -> None:
         self.rpc = rpc
@@ -168,6 +206,8 @@ class KolWatch:
         self.wallet_stats: dict[str, dict] = {}
         self.fired: dict[str, float] = {}  # f"{kind}:{mint}" -> t
         self.open: list[CopyPath] = []
+        self.tx_queue: asyncio.Queue = asyncio.Queue(maxsize=1000)
+        self.seen_sigs: set[str] = set()
         self.tasks: set[asyncio.Task] = set()  # strong refs; the loop keeps only weak ones
         self.done: list[dict] = []
         self.stats = Counter()
@@ -411,10 +451,13 @@ class KolWatch:
         while True:
             self.subscribed = set()
             try:
-                async with websockets.connect(PUMPPORTAL, ping_interval=20) as ws:
+                url = PUMPPORTAL + (f"?api-key={PUMPPORTAL_KEY}" if PUMPPORTAL_KEY else "")
+                async with websockets.connect(url, ping_interval=20) as ws:
                     await ws.send(json.dumps({"method": "subscribeNewToken"}))
                     logger.info("[pumpportal] connected")
-                    sync = asyncio.create_task(self.sync_subs(ws))
+                    sync = asyncio.create_task(
+                        self.sync_subs(ws) if PUMPPORTAL_KEY else asyncio.sleep(1e9)
+                    )
                     try:
                         async for raw in ws:
                             self.handle_pp(raw)
@@ -439,6 +482,83 @@ class KolWatch:
                 logger.info(f"[pumpportal] following {len(want)} wallets (+{len(add)} -{len(drop)})")
             self.subscribed = want
             await asyncio.sleep(30)
+
+    # ----- on-chain wallet watch (free): logsSubscribe per wallet, then parse the tx
+    async def chain_loop(self, websockets) -> None:  # noqa: ANN001
+        """Keep one public-WSS connection per WALLETS_PER_SOCKET followed wallets."""
+        running: dict[int, asyncio.Task] = {}
+        while True:
+            wallets = sorted(self.follow)
+            chunks = [wallets[i : i + WALLETS_PER_SOCKET] for i in range(0, len(wallets), WALLETS_PER_SOCKET)]
+            for i, chunk in enumerate(chunks):
+                t = running.get(i)
+                if t is None or t.done():
+                    running[i] = asyncio.create_task(self.chain_socket(websockets, i, chunk))
+            await asyncio.sleep(600)
+            for t in running.values():
+                t.cancel()  # pick up wallet-list changes
+            running.clear()
+
+    async def chain_socket(self, websockets, idx: int, wallets: list[str]) -> None:  # noqa: ANN001
+        url = os.environ.get("KOLWATCH_WSS") or PUBLIC_WSS
+        while True:
+            try:
+                async with websockets.connect(url, ping_interval=20, max_size=2**23) as ws:
+                    reqs: dict[int, str] = {}
+                    subs: dict[int, str] = {}
+                    for i, wallet in enumerate(wallets, start=1):
+                        reqs[i] = wallet
+                        await ws.send(json.dumps({
+                            "jsonrpc": "2.0", "id": i, "method": "logsSubscribe",
+                            "params": [{"mentions": [wallet]}, {"commitment": "confirmed"}],
+                        }))
+                    logger.info(f"[chain] socket {idx}: subscribing to {len(wallets)} wallets")
+                    async for raw in ws:
+                        msg = json.loads(raw)
+                        if "id" in msg and msg.get("id") in reqs:
+                            if "result" in msg:
+                                subs[msg["result"]] = reqs[msg["id"]]
+                                self.stats["chain_subs"] += 1
+                            else:
+                                self.stats["chain_sub_errors"] += 1
+                            continue
+                        params = msg.get("params") or {}
+                        val = (params.get("result") or {}).get("value") or {}
+                        wallet = subs.get(params.get("subscription"))
+                        sig = val.get("signature")
+                        if not wallet or not sig or val.get("err") is not None:
+                            continue
+                        self.stats["chain_txs"] += 1
+                        logs = " ".join(val.get("logs") or [])
+                        if PUMP_PROGRAM not in logs and PUMPSWAP_PROGRAM not in logs:
+                            continue
+                        if sig in self.seen_sigs:
+                            continue
+                        self.seen_sigs.add(sig)
+                        if self.tx_queue.full():
+                            self.tx_queue.get_nowait()
+                            self.stats["chain_dropped"] += 1
+                        self.tx_queue.put_nowait((wallet, sig, time.time()))
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"[chain] socket {idx}: {type(e).__name__} {e}")
+                await asyncio.sleep(15)
+            if len(self.seen_sigs) > 50_000:
+                self.seen_sigs.clear()
+
+    async def chain_worker(self) -> None:
+        while True:
+            wallet, sig, seen_at = await self.tx_queue.get()
+            try:
+                tx = await self.rpc.tx(sig)
+                for mint, side, sol in wallet_swaps(tx, wallet):
+                    bt = (tx or {}).get("blockTime")
+                    lag = max(0.0, seen_at - bt) if bt else 0.0
+                    self.stats["chain_swaps"] += 1
+                    self.on_trade(wallet, mint, side, "chain", lag, sol)
+            except Exception:  # noqa: BLE001
+                logger.exception("[chain] tx parse failed")
 
     def handle_pp(self, raw: str) -> None:
         try:
@@ -728,7 +848,13 @@ async def amain() -> None:
                 logger.exception("save failed")
 
     await asyncio.gather(
-        saver(), kw.feed_loop(), kw.push_loop(), kw.pumpportal_loop(websockets)
+        saver(),
+        kw.feed_loop(),
+        kw.push_loop(),
+        kw.pumpportal_loop(websockets),
+        kw.chain_loop(websockets),
+        kw.chain_worker(),
+        kw.chain_worker(),
     )
 
 
