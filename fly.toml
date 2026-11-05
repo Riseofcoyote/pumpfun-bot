@@ -18,13 +18,14 @@ primary_region = "ewr"
 [env]
   TRENDING_DATA_DIR = "/data/trades/trending"
   DEVWATCH_DATA_DIR = "/data/trades/devwatch"
+  NARRATIVE_DATA_DIR = "/data/trades/narrative"
   PAPER_SIZE_SOL = "0.2"
 
-# Two paper-only testers (src/trending, src/devwatch); if either exits, the
-# machine restarts both. src/kolwatch is retired (copying KOL buys lost money). Neither spends SOL or loads the wallet. To go back to the new-coin sniper, use:
+# Three paper-only testers (src/trending, src/devwatch, src/narrative); if any
+# exits, the machine restarts all of them. src/kolwatch is retired (copying KOL buys lost money). Neither spends SOL or loads the wallet. To go back to the new-coin sniper, use:
 #   app = "sh -c 'mkdir -p /data/trades /data/logs && exec uv run --no-sync pump_bot'"
 [processes]
-  app = "bash -c 'mkdir -p /data/trades/trending /data/trades/devwatch /data/logs && cd /app/src && /app/.venv/bin/python -m trending.engine & cd /app/src && /app/.venv/bin/python -m devwatch.engine & wait -n; exit 1'"
+  app = "bash -c 'mkdir -p /data/trades/trending /data/trades/devwatch /data/trades/narrative /data/logs && cd /app/src && /app/.venv/bin/python -m trending.engine & cd /app/src && /app/.venv/bin/python -m devwatch.engine & cd /app/src && /app/.venv/bin/python -m narrative.engine & wait -n; exit 1'"
 
 # The bot exits with code 0 if its trading process stops, and Fly's default
 # (on-failure) does not restart on code 0. Always restart instead.

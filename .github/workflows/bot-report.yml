@@ -61,3 +61,7 @@ jobs:
         if: env.FLY_API_TOKEN != ''
         run: |
           flyctl ssh console -a "$APP" -C "sh -c 'cat /data/trades/kolwatch/report.txt; echo === LOG; grep -a -E \"WARNING|ERROR|status|feed|following\" /data/trades/kolwatch/engine.log | tail -80; echo === RESULTS; cat /data/trades/kolwatch/results.csv'" || true
+      - name: Narrative - report, log highlights and results
+        if: env.FLY_API_TOKEN != ''
+        run: |
+          flyctl ssh console -a "$APP" -C "sh -c 'cat /data/trades/narrative/report.txt; echo === LOG; grep -a -E \"WARNING|ERROR|heat|status\" /data/trades/narrative/engine.log | grep -v signal | tail -60; echo === RESULTS; cat /data/trades/narrative/results.csv'" || true
