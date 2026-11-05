@@ -472,6 +472,35 @@ SEEDS_V5 = [
     },
 ]
 
+# v6: ex-rug, the only positive slices were entries on pools up 30-100% over 6h
+# with a calm 5-minute candle (+2-4% per trade), but nearly all of them came
+# from two tokens. These test whether that steady-uptrend drift holds across
+# more tokens: any source or top-40 volume, h6 floor +30%, h24 0..+200%.
+SEEDS_V6 = [
+    _V5_BASE
+    | {
+        "family": fam,
+        "source": src,
+        "max_rank": 40,
+        "h6_min": 0.3,
+        "tp": 0.25,
+        "sl": 0.45,
+        "use_trail": trail,
+        "trail_act": 0.12,
+        "trail_dist": 0.06,
+        "max_hold_min": hold,
+    }
+    for fam, src, trail, hold in (
+        ("momentum", "any", False, 55),
+        ("momentum", "any", False, 120),
+        ("momentum", "any", True, 120),
+        ("volume_leader", "volume", False, 55),
+    )
+]
+
+# Seed sets added to a running population once each, in this order.
+INJECTED_SEEDS = {"v3": SEEDS_V3, "v4": SEEDS_V4, "v5": SEEDS_V5, "v6": SEEDS_V6}
+
 SEEDS = [
     # Hand-built starting points, one or more per family; evolution takes over.
     {
@@ -601,7 +630,7 @@ class Engine:
     # ---------- population ----------
     def seed(self) -> None:
         self.injected = ["v3", "v4"]
-        for spec in SEEDS + SEEDS_V2 + SEEDS_V3 + SEEDS_V4 + SEEDS_V5:
+        for spec in SEEDS + SEEDS_V2 + SEEDS_V3 + SEEDS_V4 + SEEDS_V5 + SEEDS_V6:
             s = random_strategy(self.rng, spec["family"])
             s.update(spec)
             repair(s)
@@ -1039,12 +1068,9 @@ class Engine:
                 s.setdefault(name, LOOSE.get(name, RANGES[name][0]))
             s["stats"].setdefault("mints", {})
             repair(s)
-        if "v3" not in self.injected:
-            self._inject("v3", SEEDS_V3)
-        if "v4" not in self.injected:
-            self._inject("v4", SEEDS_V4)
-        if "v5" not in self.injected:
-            self._inject("v5", SEEDS_V5)
+        for tag, specs in INJECTED_SEEDS.items():
+            if tag not in self.injected:
+                self._inject(tag, specs)
         now = time.time()
         self.cooldown = {k: v for k, v in self.cooldown.items() if v > now}
         return True
