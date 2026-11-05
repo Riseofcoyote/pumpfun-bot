@@ -65,6 +65,8 @@ STATE_VERSION = 2
 # A drained read with the price halving is a rug, closed at 30% at once.
 DRAIN_EXIT_TICKS = 12
 DRAINED_HAIRCUT = 0.85
+# Consecutive reads of a 3x jump on a drained pool before it counts as a rug.
+RUG_SPIKE_TICKS = 3
 
 logger = logging.getLogger("trending")
 
@@ -719,6 +721,15 @@ class Engine:
                 crashed = price < 0.5 * p["last"] or price < 0.5 * p["entry"]
                 rugged = low and crashed
                 spiked = price > 3 * p["last"] and 0 < fq["liq"] < 0.5 * p["liq0"]
+                if not spiked:
+                    p["rug_spike_ticks"] = 0
+                elif p.get("rug_spike_ticks", 0) < RUG_SPIKE_TICKS - 1:
+                    # A 3x print on a drained read is usually a wrong-pool quote
+                    # (a tokenized stock reopened at its old price after one); a
+                    # real pull stays drained, so it must repeat before it closes.
+                    p["rug_spike_ticks"] = p.get("rug_spike_ticks", 0) + 1
+                    keep.append(p)
+                    continue
                 if rugged or spiked:
                     # Pool pulled and price collapsing: the quote is not sellable.
                     reason, px = "rug", min(price, p["last"]) * 0.3
