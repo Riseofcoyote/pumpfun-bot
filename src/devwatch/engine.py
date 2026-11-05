@@ -66,7 +66,10 @@ MAX_FUNDERS = 100
 LINK_DAYS = 7
 MIN_LINK_SOL = 0.05
 HUB_TRANSFERS_PER_DAY = 25
-WALLETS_PER_SOCKET = 80
+WALLETS_PER_SOCKET = 100
+# The public WSS answers 429 past a handful of connections per IP, and the KOL
+# watch shares this machine's IP with three sockets of its own.
+MAX_SOCKETS = 2
 SUB_GAP = 0.3  # seconds between logsSubscribe requests on one socket
 RESUB_MIN_S = 1800  # least time between watchlist-driven resubscriptions
 # Launches tracked per creator per UTC day; later ones are counted, not tracked,
@@ -560,13 +563,18 @@ class DevWatch:
     async def logs_loop(self, websockets) -> None:  # noqa: ANN001
         """Follow the watched wallets, WALLETS_PER_SOCKET per public-WSS connection.
 
+        At most MAX_SOCKETS connections; wallets past that budget are not followed.
+
         The public endpoint closes a socket with 1013 when subscriptions arrive in a
         burst, so each socket paces them SUB_GAP apart and backs off on errors. The
         plan WSS refuses logsSubscribe (403), so it is not used here. A watchlist
         change restarts the sockets at most every RESUB_MIN_S.
         """
         while True:
-            w = list(self.watched())
+            ws_ = self.watched()
+            # creators before funders when the socket budget truncates the list
+            w = sorted(ws_, key=lambda a: ws_[a] != "creator")
+            w = w[: WALLETS_PER_SOCKET * MAX_SOCKETS]
             version = self.watch_version
             if not w:
                 await asyncio.sleep(30)
