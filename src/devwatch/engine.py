@@ -66,6 +66,12 @@ MAX_FUNDERS = 100
 LINK_DAYS = 7
 MIN_LINK_SOL = 0.05
 HUB_TRANSFERS_PER_DAY = 25
+WALLETS_PER_SOCKET = 80
+SUB_GAP = 0.3  # seconds between logsSubscribe requests on one socket
+RESUB_MIN_S = 1800  # least time between watchlist-driven resubscriptions
+# Launches tracked per creator per UTC day; later ones are counted, not tracked,
+# so one serial launcher cannot dominate a signal type's sample.
+MAX_SIGNALS_PER_CREATOR_DAY = 3
 # Creators of coins seen graduating live (PumpPortal migration stream), kept for
 # same-wallet matching; the oldest are dropped past this many.
 MAX_GRAD_CREATORS = 5000
@@ -350,6 +356,7 @@ class DevWatch:
         self.linked: dict[str, dict] = {}  # wallet -> {via, via_kind, at, sol}
         self.hubs: set[str] = set()
         self.transfers_today: Counter = Counter()
+        self.creator_signals: Counter = Counter()  # (utc day, creator) -> launches
         self.day = datetime.now(UTC).date().isoformat()
         self.seen_sigs: set[str] = set()
         self.tx_queue: asyncio.Queue = asyncio.Queue(maxsize=500)
@@ -551,42 +558,77 @@ class DevWatch:
 
     # ----- linked wallets
     async def logs_loop(self, websockets) -> None:  # noqa: ANN001
-        plan = os.environ.get("SOLANA_NODE_WSS_ENDPOINT")
-        urls = [PUBLIC_WSS] + ([plan] if plan else [])
-        which = 0
+        """Follow the watched wallets, WALLETS_PER_SOCKET per public-WSS connection.
+
+        The public endpoint closes a socket with 1013 when subscriptions arrive in a
+        burst, so each socket paces them SUB_GAP apart and backs off on errors. The
+        plan WSS refuses logsSubscribe (403), so it is not used here. A watchlist
+        change restarts the sockets at most every RESUB_MIN_S.
+        """
         while True:
-            url = urls[which % len(urls)]
-            w = self.watched()
+            w = list(self.watched())
             version = self.watch_version
             if not w:
                 await asyncio.sleep(30)
                 continue
+            chunks = [
+                w[i : i + WALLETS_PER_SOCKET]
+                for i in range(0, len(w), WALLETS_PER_SOCKET)
+            ]
+            socks = []
+            for idx, chunk in enumerate(chunks):
+                socks.append(
+                    asyncio.create_task(self.logs_socket(websockets, idx, chunk))
+                )
+                await asyncio.sleep(len(chunk) * SUB_GAP + 5)
+            logger.info(f"[logs] following {len(w)} wallets on {len(chunks)} sockets")
+            started = time.time()
+            while self.watch_version == version or time.time() - started < RESUB_MIN_S:
+                await asyncio.sleep(30)
+            for t in socks:
+                t.cancel()
+            await asyncio.gather(*socks, return_exceptions=True)
+            if len(self.seen_sigs) > 50_000:
+                self.seen_sigs.clear()
+
+    async def logs_socket(self, websockets, idx: int, wallets: list[str]) -> None:  # noqa: ANN001
+        backoff = 30
+        while True:
+            sub_task = None
             try:
                 async with websockets.connect(
-                    url, ping_interval=20, max_size=2**22
+                    PUBLIC_WSS, ping_interval=20, max_size=2**22
                 ) as ws:
                     subs: dict[int, str] = {}
-                    reqs: dict[int, str] = {}
-                    for i, wallet in enumerate(w, start=1):
-                        reqs[i] = wallet
-                        await ws.send(
-                            json.dumps(
-                                {
-                                    "jsonrpc": "2.0",
-                                    "id": i,
-                                    "method": "logsSubscribe",
-                                    "params": [
-                                        {"mentions": [wallet]},
-                                        {"commitment": "confirmed"},
-                                    ],
-                                }
+                    reqs = dict(enumerate(wallets, start=1))
+
+                    async def subscribe(ws=ws, reqs=reqs) -> None:  # noqa: ANN001
+                        for i, wallet in reqs.items():
+                            await ws.send(
+                                json.dumps(
+                                    {
+                                        "jsonrpc": "2.0",
+                                        "id": i,
+                                        "method": "logsSubscribe",
+                                        "params": [
+                                            {"mentions": [wallet]},
+                                            {"commitment": "confirmed"},
+                                        ],
+                                    }
+                                )
                             )
-                        )
-                    logger.info(f"[logs] subscribing to {len(w)} wallets")
+                            await asyncio.sleep(SUB_GAP)
+
+                    sub_task = asyncio.create_task(subscribe())
                     async for raw in ws:
                         msg = json.loads(raw)
-                        if "id" in msg and "result" in msg and msg["id"] in reqs:
-                            subs[msg["result"]] = reqs[msg["id"]]
+                        if "id" in msg and msg.get("id") in reqs:
+                            if "result" in msg:
+                                subs[msg["result"]] = reqs[msg["id"]]
+                                self.stats["logs_subs"] += 1
+                                backoff = 30
+                            else:
+                                self.stats["logs_sub_errors"] += 1
                             continue
                         params = msg.get("params") or {}
                         val = (params.get("result") or {}).get("value") or {}
@@ -599,17 +641,21 @@ class DevWatch:
                             and sig not in self.seen_sigs
                         ):
                             self.seen_sigs.add(sig)
+                            self.stats["logs_txs"] += 1
                             if self.tx_queue.full():
                                 self.tx_queue.get_nowait()
                             self.tx_queue.put_nowait((wallet, sig))
-                        if self.watch_version != version:
-                            break  # watchlist changed: resubscribe
+            except asyncio.CancelledError:
+                raise
             except Exception as e:  # noqa: BLE001
-                which += 1  # the other endpoint next time
-                logger.warning(f"[logs] connection error: {type(e).__name__} {e}")
-                await asyncio.sleep(10 if which % len(urls) else 30)
-            if len(self.seen_sigs) > 50_000:
-                self.seen_sigs.clear()
+                logger.warning(
+                    f"[logs] socket {idx}: {type(e).__name__} {str(e)[:120]}; retry in {backoff}s"
+                )
+            finally:
+                if sub_task:
+                    sub_task.cancel()
+            await asyncio.sleep(backoff + random.uniform(0, 20))
+            backoff = min(backoff * 2, 900)
 
     async def tx_worker(self) -> None:
         while True:
@@ -725,6 +771,13 @@ class DevWatch:
                         }
                         if hit:
                             kind, extra = hit
+                            key = (datetime.now(UTC).date().isoformat(), creator)
+                            self.creator_signals[key] += 1
+                            if self.creator_signals[key] > MAX_SIGNALS_PER_CREATOR_DAY:
+                                self.stats[f"capped_{kind}"] += 1
+                                continue
+                            if len(self.creator_signals) > 20_000:
+                                self.creator_signals.clear()
                             self.stats[f"signal_{kind}"] += 1
                             logger.warning(
                                 f"[signal] {kind} {meta['symbol']} {meta['mint']} by {creator[:8]} {extra}"
@@ -855,7 +908,7 @@ class DevWatch:
         lines.append(
             f"Results per launch type, net per trade after costs ({SIZE_SOL} SOL paper stake):"
         )
-        hdr = "  type               n   peak>2x  grad  " + "  ".join(
+        hdr = "  type               n  devs  peak>2x  grad  " + "  ".join(
             f"{n:>7}" for n, *_ in VARIANTS
         )
         lines.append(hdr)
@@ -878,8 +931,12 @@ class DevWatch:
             p2 = sum(float(r["peak_mult"]) >= 2 for r in rs) / len(rs)
             gr = sum(r["graduated"] in ("True", True) for r in rs) / len(rs)
             lines.append(
-                f"  {kind:17} {len(rs):3}   {p2:6.0%}  {gr:4.0%}  " + "  ".join(cells)
+                f"  {kind:17} {len(rs):3}  {len({r['creator'] for r in rs}):4}   {p2:6.0%}  {gr:4.0%}  "
+                + "  ".join(cells)
             )
+        lines.append(
+            "  (means; one big winner can carry a column, so read them with peak>2x and devs)"
+        )
         sig = [r for r in self.done if r["kind"] != "control"]
         if sig:
             lines.append("\nRecent signals:")
