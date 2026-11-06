@@ -68,6 +68,8 @@ DRAIN_EXIT_TICKS = 12
 DRAINED_HAIRCUT = 0.85
 # Consecutive reads of a 3x jump on a drained pool before it counts as a rug.
 RUG_SPIKE_TICKS = 3
+# Consecutive drained reads with the price halved before it counts as a rug.
+RUG_CRASH_TICKS = 3
 # A ticker seen on another mint within this window is a serial relaunch: PREDICT
 # and XTEN came back as a new mint each day, ground up 5%/hour, then dumped 70%.
 RELAUNCH_WINDOW_H = 72
@@ -812,6 +814,15 @@ class Engine:
                     # (a tokenized stock reopened at its old price after one); a
                     # real pull stays drained, so it must repeat before it closes.
                     p["rug_spike_ticks"] = p.get("rug_spike_ticks", 0) + 1
+                    keep.append(p)
+                    continue
+                if not rugged:
+                    p["rug_crash_ticks"] = 0
+                elif p.get("rug_crash_ticks", 0) < RUG_CRASH_TICKS - 1:
+                    # One drained, crashed print is often a wrong-pool quote (a
+                    # tokenized stock read at a fraction of a cent); a real pull
+                    # stays pulled, so it must repeat before it closes.
+                    p["rug_crash_ticks"] = p.get("rug_crash_ticks", 0) + 1
                     keep.append(p)
                     continue
                 if rugged or spiked:
