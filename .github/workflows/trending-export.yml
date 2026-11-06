@@ -1,0 +1,16 @@
+# Prints the trending tester's paper trade logs (gzip+base64) for offline analysis.
+name: Trending export
+on: workflow_dispatch
+permissions:
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+    steps:
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - run: |
+          flyctl ssh console -a pumpfun-bot-w1afdq -C "sh -c 'cd /data/trades/trending && tar czf - trades*.csv | base64 -w0'" > out.b64
+          echo "BEGIN_EXPORT"; cat out.b64; echo; echo "END_EXPORT"
