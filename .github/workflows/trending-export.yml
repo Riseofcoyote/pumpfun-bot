@@ -16,6 +16,7 @@ jobs:
           flyctl ssh console -a pumpfun-bot-w1afdq -C "sh -c 'cd /data/trades/trending && tar czf - trades*.csv snapshots 2>/dev/null | base64 -w0'" > out.b64
           base64 -d out.b64 > trending-export.tgz
           tar tzvf trending-export.tgz | tail -20
+          echo "BEGIN_EXPORT"; cat out.b64; echo; echo "END_EXPORT"
       - uses: actions/upload-artifact@v4
         with:
           name: trending-export
