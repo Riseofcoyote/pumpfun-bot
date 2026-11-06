@@ -67,6 +67,9 @@ DRAIN_EXIT_TICKS = 12
 DRAINED_HAIRCUT = 0.85
 # Consecutive reads of a 3x jump on a drained pool before it counts as a rug.
 RUG_SPIKE_TICKS = 3
+# A ticker seen on another mint within this window is a serial relaunch: PREDICT
+# and XTEN came back as a new mint each day, ground up 5%/hour, then dumped 70%.
+RELAUNCH_WINDOW_H = 72
 
 logger = logging.getLogger("trending")
 
@@ -626,6 +629,8 @@ class Engine:
         self.totals = {"opened": 0, "closed": 0, "snapshots": 0}
         self.version = STATE_VERSION
         self.injected: list[str] = []
+        # Ticker (upper case) -> {mint: last seen, epoch seconds}.
+        self.symbol_mints: dict[str, dict[str, float]] = {}
 
     # ---------- population ----------
     def seed(self) -> None:
@@ -654,6 +659,13 @@ class Engine:
         """Find entries in a discovery snapshot and paper-fill them."""
         self.totals["snapshots"] += 1
         now = time.time()
+        self._note_symbols(snap.values(), now)
+        relaunch = {r["mint"] for r in snap.values() if self.relaunched(r, now)}
+        logged = getattr(self, "_relaunch_logged", set())
+        for r in snap.values():
+            if r["mint"] in relaunch and r["mint"] not in logged:
+                logger.info(f"[relaunch] skipping {r['symbol']} {r['mint']}")
+        self._relaunch_logged = logged | relaunch
         open_by_sid = Counter(p["sid"] for p in self.positions)
         held = {(p["sid"], p["mint"]) for p in self.positions}
         wanted: list[tuple[dict, dict]] = []
@@ -664,6 +676,8 @@ class Engine:
                     break
                 key = f"{s['id']}:{rec['mint']}"
                 if (s["id"], rec["mint"]) in held or self.cooldown.get(key, 0) > now:
+                    continue
+                if rec["mint"] in relaunch:
                     continue
                 if entry_signal(s, rec, self.prev_ranks.get(rec["pool"])):
                     wanted.append((s, rec))
@@ -722,6 +736,46 @@ class Engine:
                 f"[paper] OPEN {s['id']} {s['family']:13} {rec['symbol']:12} "
                 f"@ {fq['price']:.8g} liq ${liq:,.0f} cost/side {cost:.2%}"
             )
+
+    def _note_symbols(self, recs, now: float) -> None:  # noqa: ANN001
+        cutoff = now - RELAUNCH_WINDOW_H * 3600
+        for r in recs:
+            sym = str(r.get("symbol", "")).upper()
+            if sym and r.get("mint"):
+                self.symbol_mints.setdefault(sym, {})[r["mint"]] = now
+        pruned = {}
+        for sym, mints in self.symbol_mints.items():
+            kept = {m: t for m, t in mints.items() if t >= cutoff}
+            if kept:
+                pruned[sym] = kept
+        self.symbol_mints = pruned
+
+    def relaunched(self, rec: dict, now: float) -> bool:
+        """True when the ticker was seen on a different mint inside the window."""
+        cutoff = now - RELAUNCH_WINDOW_H * 3600
+        mints = self.symbol_mints.get(str(rec.get("symbol", "")).upper(), {})
+        return any(m != rec["mint"] and t >= cutoff for m, t in mints.items())
+
+    def backfill_symbols(self, path: Path) -> None:
+        """Seed the ticker history from the trade ledger after a restart."""
+        if self.symbol_mints or not path.exists():
+            return
+        cutoff = time.time() - RELAUNCH_WINDOW_H * 3600
+        try:
+            with path.open(newline="") as f:
+                for row in csv.DictReader(f):
+                    try:
+                        t = datetime.strptime(
+                            row["time_utc"], "%Y-%m-%dT%H:%M:%SZ"
+                        ).replace(tzinfo=UTC).timestamp()
+                    except (KeyError, ValueError):
+                        continue
+                    sym, mint = (row.get("symbol") or "").upper(), row.get("mint")
+                    if t >= cutoff and sym and mint:
+                        seen = self.symbol_mints.setdefault(sym, {})
+                        seen[mint] = max(seen.get(mint, 0.0), t)
+        except OSError as e:
+            logger.warning(f"ticker backfill failed: {e}")
 
     def on_quotes(self, q: dict[str, dict]) -> None:
         """Mark open positions to the latest prices and close any that exit."""
@@ -1042,6 +1096,7 @@ class Engine:
                 "totals",
                 "version",
                 "injected",
+                "symbol_mints",
             )
         }
         tmp = DATA / "state.json.tmp"
@@ -1073,6 +1128,8 @@ class Engine:
                 self._inject(tag, specs)
         now = time.time()
         self.cooldown = {k: v for k, v in self.cooldown.items() if v > now}
+        self.symbol_mints = state.get("symbol_mints") or {}
+        self.backfill_symbols(DATA / "trades.csv")
         return True
 
     def _inject(self, tag: str, specs: list[dict]) -> None:
