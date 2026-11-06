@@ -271,7 +271,7 @@ def farm_rule(rec: dict) -> bool:
 
 RESULT_FIELDS = [
     "time_utc", "kind", "symbol", "mint", "theme", "themes", "after", "age_h",
-    "age_exit", "venue", "graduated", "peak_mult", "mult_m5", "mult_m15", "mult_m60",
+    "age_exit", "px_src", "lost_price", "venue", "graduated", "peak_mult", "mult_m5", "mult_m15", "mult_m60",
 ] + [f"{n}_{x}" for n, *_ in VARIANTS for x in ("net", "why")]  # fmt: skip
 
 
@@ -487,14 +487,14 @@ class Narrative:
                 if fresh:
                     top = fresh[0]
                     self.leader_seen[top["mint"]] = now
-                    self.fire("leader_any", {"mint": top["mint"], "symbol": top["symbol"],
+                    self.fire("leader_any", {"mint": top["mint"], "pool": top["pool"], "symbol": top["symbol"],
                                              "theme": "|".join(sorted(self.pool_tags(top))), "amm": True})
                 hot = self.heat.hot()
                 for th in hot:
                     pick = next((r for r in fresh if th in self.pool_tags(r)), None)
                     if pick:
                         self.leader_seen[pick["mint"]] = now
-                        self.fire("leader", {"mint": pick["mint"], "symbol": pick["symbol"], "theme": th,
+                        self.fire("leader", {"mint": pick["mint"], "pool": pick["pool"], "symbol": pick["symbol"], "theme": th,
                                              "amm": True})
                         break
                 else:
@@ -509,7 +509,7 @@ class Narrative:
                                    for m, t in seen.items())
                     self.farm_open.add(r["mint"])
                     self.fire("farm_relaunch" if relaunch else "farm_first",
-                              {"mint": r["mint"], "symbol": r["symbol"], "amm": True,
+                              {"mint": r["mint"], "pool": r["pool"], "symbol": r["symbol"], "amm": True,
                                "theme": "", "age_h": round(r["age_h"], 1),
                                "exit_after_s": (FARM_EXIT_AGE_H - r["age_h"]) * 3600})
                 # Volume-leader rule with and without a hot theme: does the theme add anything?
@@ -518,12 +518,12 @@ class Narrative:
                 if vol_ok:
                     top = vol_ok[0]
                     self.vol_seen[top["mint"]] = now
-                    self.fire("vol_any", {"mint": top["mint"], "symbol": top["symbol"],
+                    self.fire("vol_any", {"mint": top["mint"], "pool": top["pool"], "symbol": top["symbol"],
                                           "theme": "|".join(sorted(self.pool_tags(top))), "amm": True})
                     themed = next((r for r in vol_ok if self.pool_tags(r) & set(hot)), None)
                     if themed:
                         self.vol_seen[themed["mint"]] = now
-                        self.fire("leader_vol", {"mint": themed["mint"], "symbol": themed["symbol"],
+                        self.fire("leader_vol", {"mint": themed["mint"], "pool": themed["pool"], "symbol": themed["symbol"],
                                                  "theme": "|".join(sorted(self.pool_tags(themed) & set(hot))),
                                                  "amm": True})
             except Exception:  # noqa: BLE001
@@ -532,6 +532,16 @@ class Narrative:
 
     # ----- paper trade
     async def track(self, kind: str, meta: dict) -> None:
+        try:
+            await self._track(kind, meta)
+        finally:
+            self.farm_open.discard(meta.get("mint") or "")
+
+    def pool_price(self, pool: str, mint: str) -> float | None:
+        q = feeds.quotes({pool: mint}).get(pool)
+        return q["price"] if q else None
+
+    async def _track(self, kind: str, meta: dict) -> None:
         mint = meta.get("mint")
         if not mint:
             return
@@ -540,7 +550,17 @@ class Narrative:
         tokens = 0.0
         entry_px = None
         curve_addr = meta.get("curve")
-        if meta.get("amm") or not curve_addr:
+        pool = meta.get("pool")
+        if pool:
+            entry_px = await asyncio.to_thread(self.pool_price, pool, mint)
+            meta["px_src"] = "pool"
+            if not entry_px:
+                self.stats["unpriced"] += 1
+                return
+            first = (1 - GRAD_SIDE - LATENCY) ** 2
+            meta["venue"] = "amm"
+        elif meta.get("amm") or not curve_addr:
+            meta["px_src"] = "jup"
             entry_px = (await asyncio.to_thread(feeds.jup_prices, [mint])).get(mint)
             if not entry_px:
                 self.stats["unpriced"] += 1
@@ -563,6 +583,7 @@ class Narrative:
                 return
             first = curve_sell_lamports(cur["vt"], cur["vq"], tokens) / stake
             meta["venue"] = "curve"
+            meta["px_src"] = "curve"
         p = GuardedPath(kind, meta)
         self.open.append(p)
         p.mark(first)
@@ -585,7 +606,10 @@ class Narrative:
                         p.meta["graduated"] = True
                         mult = p.last
             else:
-                px = (await asyncio.to_thread(feeds.jup_prices, [mint])).get(mint)
+                if pool:
+                    px = await asyncio.to_thread(self.pool_price, pool, mint)
+                else:
+                    px = (await asyncio.to_thread(feeds.jup_prices, [mint])).get(mint)
                 if px:
                     base = p.meta.get("grad_base", (1 - GRAD_SIDE - LATENCY) ** 2)
                     mult = base * px / entry_px
@@ -601,7 +625,14 @@ class Narrative:
                         p.meta.pop("spike", None)
             if mult is None:
                 fails += 1
+                if pool and fails >= 10:
+                    # The pool stopped quoting: count it as pulled, not frozen at the last price.
+                    p.meta["lost_price"] = True
+                    self.stats["lost_price"] += 1
+                    p.mark(0.0)
+                    break
                 if fails > 40:
+                    p.meta["lost_price"] = True
                     break
                 continue
             fails = 0
@@ -610,7 +641,6 @@ class Narrative:
             p.meta["age_exit"] = True
         p.finish()
         self.open.remove(p)
-        self.farm_open.discard(mint)
         self.record(p)
 
     def record(self, p: GuardedPath) -> None:
@@ -624,6 +654,8 @@ class Narrative:
             "after": p.meta.get("after") or "",
             "age_h": p.meta.get("age_h", ""),
             "age_exit": bool(p.meta.get("age_exit")),
+            "px_src": p.meta.get("px_src", ""),
+            "lost_price": bool(p.meta.get("lost_price")),
             "venue": p.meta.get("venue"),
             "graduated": bool(p.meta.get("graduated")),
             "peak_mult": round(p.peak, 3),
@@ -663,7 +695,10 @@ class Narrative:
         lines.append(f"Per strategy, net per trade after costs ({SIZE_SOL} SOL stake): mean / median / win%")
         lines.append("  strategy        n  peak>2x  " + "  ".join(f"{e:>18}" for e in exits))
         by = defaultdict(list)
+        amm_kinds = {"leader", "leader_any", "leader_vol", "vol_any", "farm_relaunch", "farm_first"}
         for r in self.done:
+            if r["kind"] in amm_kinds and not r.get("px_src"):
+                continue  # priced from Jupiter before pool pricing; stale prints looked like holds
             by[r["kind"]].append(r)
         for kind in ("farm_relaunch", "farm_first", "leader", "leader_any", "leader_vol", "vol_any",
                      "cold", "control",
@@ -678,7 +713,7 @@ class Narrative:
             p2 = sum(float(r["peak_mult"]) >= 2 for r in rs) / len(rs)
             label = f"{kind}*" if kind in ("hot_early", "second_wave") else kind
             lines.append(f"  {label:13} {len(rs):4}  {p2:6.0%}  " + "  ".join(f"{c:>18}" for c in cells))
-        lines.append("  (* retired; history only)")
+        lines.append("  (* retired; history only. Trending-coin rows count only pool-priced trades.)")
         th_rows = defaultdict(list)
         for r in self.done:
             if r["kind"] in ("leader", "leader_vol") and r["theme"]:
