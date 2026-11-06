@@ -23,6 +23,10 @@ MIN_POOL_AGE_H = 6.0
 # into a 5-minute candle already up 10% lost after costs in every ledger so far.
 MIN_LIQ_USD = 50_000.0
 MAX_ENTRY_M5 = 0.10
+# Entries into a pool already up more than 200% over 24 hours lost after costs in
+# every family, and held all but a handful of the rugs (farm tokens pulled at
+# the top of their cycle).
+MAX_ENTRY_H24 = 2.0
 
 # name -> (low, high, kind). kind "f" float, "i" int, "log" float sampled in log space.
 RANGES: dict[str, tuple[float, float, str]] = {
@@ -36,8 +40,8 @@ RANGES: dict[str, tuple[float, float, str]] = {
     "h1_min": (-0.30, 0.40, "f"),
     "h1_max": (0.05, 1.0, "log"),
     "h6_min": (-0.5, 2.0, "f"),
-    "h24_min": (-0.9, 3.0, "f"),
-    "h24_max": (0.2, 20.0, "log"),
+    "h24_min": (-0.9, 1.5, "f"),
+    "h24_max": (0.2, MAX_ENTRY_H24, "log"),
     "buy_ratio_min": (0.6, 1.8, "f"),
     "min_m5_vol": (500, 60_000, "log"),
     "min_m5_buyers": (0, 60, "i"),
@@ -62,7 +66,7 @@ LOOSE = {
     "max_age_h": 5_000.0,
     "h6_min": -0.5,
     "h24_min": -0.9,
-    "h24_max": 20.0,
+    "h24_max": MAX_ENTRY_H24,
     "min_m5_buyers": 0.0,
     "min_m5_vol": 500.0,
     "buy_ratio_min": 0.6,
@@ -190,7 +194,7 @@ def entry_signal(s: dict, rec: dict, prev_ranks: dict[str, int] | None) -> bool:
         if r is None or r > s["max_rank"]:
             return False
     pc, tx, vol = rec["pc"], rec["tx"]["m5"], rec["vol"]
-    if pc["m5"] > MAX_ENTRY_M5:
+    if pc["m5"] > MAX_ENTRY_M5 or pc["h24"] > MAX_ENTRY_H24:
         return False
     t5 = ranks.get("trend5m")
     if t5 is not None and t5 < s.get("min_t5_rank", 1.0):
@@ -200,7 +204,7 @@ def entry_signal(s: dict, rec: dict, prev_ranks: dict[str, int] | None) -> bool:
         return False
     if tx["buyers"] < s["min_m5_buyers"]:
         return False
-    if not s["h24_min"] <= pc["h24"] <= s.get("h24_max", 20.0):
+    if not s["h24_min"] <= pc["h24"] <= s.get("h24_max", MAX_ENTRY_H24):
         return False
     if pc.get("h6", 0.0) < s.get("h6_min", -0.5):
         return False
@@ -269,7 +273,7 @@ def describe(s: dict) -> str:
         f"liq>{s['min_liq'] / 1e3:.0f}k mcap<{s['max_mcap'] / 1e6:.1f}M",
         f"age {s['min_age_h']:.0f}-{s['max_age_h']:.0f}h",
         f"m5 {s['m5_min']:+.0%}..{s['m5_max']:+.0%} h1 {s['h1_min']:+.0%}..{s['h1_max']:+.0%}",
-        f"h6>{s.get('h6_min', -0.5):+.0%} h24 {s['h24_min']:+.0%}..{s.get('h24_max', 20.0):+.0%}",
+        f"h6>{s.get('h6_min', -0.5):+.0%} h24 {s['h24_min']:+.0%}..{s.get('h24_max', MAX_ENTRY_H24):+.0%}",
         f"b/s>{s['buy_ratio_min']:.2f} vol5m>{s['min_m5_vol'] / 1e3:.1f}k",
         f"TP {s['tp']:.0%} SL {s['sl']:.0%}",
     ]
