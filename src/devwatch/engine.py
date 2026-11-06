@@ -90,6 +90,24 @@ VARIANTS = [
     ("hold60", None, None, None, None, 3600),
 ]
 
+# The same rules entered late, only on launches still worth at least `floor` of
+# the stake at `delay` seconds; most grad_dev launches are dumped within minutes.
+# (name, delay s, floor, take profit, stop loss, trail activate, trail distance,
+# max hold s from create). A launch below the floor is "skip": no trade.
+DELAYED = [
+    ("d5_trail", 300, 0.6, None, 0.35, 0.30, 0.20, 3600),
+    ("d5_hold", 300, 0.6, None, None, None, None, 3600),
+    ("d15_trail", 900, 0.6, None, 0.35, 0.30, 0.20, 3600),
+]
+# A late entry pays its own buy and sell fee and latency on the value ratio.
+LATE_COST = ((1 - CURVE_FEE) * (1 - LATENCY)) ** 2
+BASE_RULES = {v[0] for v in VARIANTS}
+RULE_NAMES = [v[0] for v in VARIANTS] + [v[0] for v in DELAYED]
+RESULT_FIELDS = [
+    "time_utc", "kind", "symbol", "mint", "creator", "via", "source_mcap",
+    "graduated", "peak_mult", "mult_m5", "mult_m15", "mult_m30", "mult_m60",
+] + [f"{n}_{x}" for n in RULE_NAMES for x in ("net", "why")]  # fmt: skip
+
 EXCHANGES = {
     "5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9",
     "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM",
@@ -221,6 +239,7 @@ class Path_:
         self.mults: list[tuple[float, float]] = []
         self.peak = 0.0
         self.exits: dict[str, tuple[str, float, float]] = {}
+        self.late: dict[str, list[float]] = {}  # name -> [entry mult, peak mult]
 
     def mark(self, mult: float) -> None:
         el = time.time() - self.t0
@@ -245,12 +264,45 @@ class Path_:
                 why, val = "time", mult
             if why:
                 self.exits[name] = (why, val - 1, el)
+        self._mark_late(el, mult)
+
+    def _mark_late(self, el: float, mult: float) -> None:
+        for name, delay, floor, tp, sl, act, dist, hold in DELAYED:
+            if name in self.exits or el < delay:
+                continue
+            if name not in self.late:
+                if mult < floor or mult <= 0:
+                    self.exits[name] = ("skip", 0.0, el)
+                else:
+                    self.late[name] = [mult, mult]
+                continue
+            base, peak = self.late[name]
+            peak = self.late[name][1] = max(peak, mult)
+            r = mult / base * LATE_COST - 1
+            pr = peak / base * LATE_COST - 1
+            why = None
+            if tp is not None and r >= tp:
+                why, r = "tp", tp
+            elif sl is not None and r <= -sl:
+                why = "sl"
+            elif act is not None and pr >= act and mult <= peak * (1 - dist):
+                why = "trail"
+            elif el >= hold:
+                why = "time"
+            if why:
+                self.exits[name] = (why, r, el)
 
     def finish(self) -> None:
         last = self.mults[-1][1] if self.mults else 0.0
         el = time.time() - self.t0
         for name, *_ in VARIANTS:
             self.exits.setdefault(name, ("end", last - 1, el))
+        for name, *_ in DELAYED:
+            if name in self.late:
+                net = last / self.late[name][0] * LATE_COST - 1
+                self.exits.setdefault(name, ("end", net, el))
+            else:
+                self.exits.setdefault(name, ("skip", 0.0, el))
 
     def at(self, sec: float) -> float | None:
         best = None
@@ -399,7 +451,24 @@ class DevWatch:
         rp = DATA / "results.csv"
         if rp.exists():
             with rp.open() as f:
-                self.done = [r for r in csv.DictReader(f)]
+                reader = csv.DictReader(f)
+                self.done = list(reader)
+                old = reader.fieldnames or []
+            if old != RESULT_FIELDS:
+                # New exit rules add columns; rewrite under the new header, old
+                # rows keeping blanks there, so appended rows stay aligned.
+                tmp = DATA / "results.csv.tmp"
+                with tmp.open("w", newline="") as f:
+                    w = csv.DictWriter(
+                        f, fieldnames=RESULT_FIELDS, extrasaction="ignore"
+                    )
+                    w.writeheader()
+                    for r in self.done:
+                        w.writerow({k: r.get(k, "") for k in RESULT_FIELDS})
+                tmp.replace(rp)
+                logger.warning(
+                    f"[results] header migrated ({len(self.done)} rows kept)"
+                )
 
     # ----- watchlist
     def watched(self) -> dict[str, str]:
@@ -830,7 +899,9 @@ class DevWatch:
         last_val = curve_sell_lamports(cur["vt"], cur["vq"], tokens)
         path.mark(last_val / stake)
         token_raw_per_ui = 1e6
-        while time.time() - path.t0 < TRACK_SECONDS and len(path.exits) < len(VARIANTS):
+        while time.time() - path.t0 < TRACK_SECONDS and len(path.exits) < len(
+            RULE_NAMES
+        ):
             el = time.time() - path.t0
             await asyncio.sleep(4 if el < 600 else 15)
             data = await self.rpc.account(curve_addr)
@@ -880,21 +951,21 @@ class DevWatch:
         for sec, name in ((300, "m5"), (900, "m15"), (1800, "m30"), (3600, "m60")):
             v = p.at(sec)
             row[f"mult_{name}"] = round(v, 3) if v is not None else ""
-        for name, *_ in VARIANTS:
-            why, net, el = p.exits[name]
-            row[f"{name}_net"] = round(net, 4)
+        for name in RULE_NAMES:
+            why, net, _el = p.exits[name]
+            row[f"{name}_net"] = "" if why == "skip" else round(net, 4)
             row[f"{name}_why"] = why
         path = DATA / "results.csv"
         new = not path.exists()
         with path.open("a", newline="") as f:
-            w = csv.DictWriter(f, fieldnames=list(row))
+            w = csv.DictWriter(f, fieldnames=RESULT_FIELDS)
             if new:
                 w.writeheader()
             w.writerow(row)
         self.done.append({k: str(v) for k, v in row.items()})
         logger.info(
             f"[result] {p.kind} {row['symbol']} peak x{p.peak:.2f} "
-            + " ".join(f"{n}={p.exits[n][1]:+.0%}" for n, *_ in VARIANTS)
+            + " ".join(f"{n}={p.exits[n][1]:+.0%}" for n in RULE_NAMES)
         )
 
     # ----- reporting
@@ -917,7 +988,7 @@ class DevWatch:
             f"Results per launch type, net per trade after costs ({SIZE_SOL} SOL paper stake):"
         )
         hdr = "  type               n  devs  peak>2x  grad  " + "  ".join(
-            f"{n:>7}" for n, *_ in VARIANTS
+            f"{n:>7}" for n in RULE_NAMES
         )
         lines.append(hdr)
         for kind in (
@@ -933,9 +1004,12 @@ class DevWatch:
             if not rs:
                 continue
             cells = []
-            for name, *_ in VARIANTS:
-                vals = [float(r[f"{name}_net"]) for r in rs]
-                cells.append(f"{statistics.mean(vals):+7.1%}")
+            for name in RULE_NAMES:
+                vals = [float(v) for r in rs if (v := r.get(f"{name}_net"))]
+                cell = f"{statistics.mean(vals):+.1%}" if vals else "-"
+                if vals and name not in BASE_RULES:
+                    cell += f"/{len(vals)}"
+                cells.append(f"{cell:>7}")
             p2 = sum(float(r["peak_mult"]) >= 2 for r in rs) / len(rs)
             gr = sum(r["graduated"] in ("True", True) for r in rs) / len(rs)
             lines.append(
@@ -943,7 +1017,8 @@ class DevWatch:
                 + "  ".join(cells)
             )
         lines.append(
-            "  (means; one big winner can carry a column, so read them with peak>2x and devs)"
+            "  (means; one big winner can carry a column, so read them with peak>2x and devs;"
+            " d5/d15 columns are mean/trades entered late, older rows have none)"
         )
         sig = [r for r in self.done if r["kind"] != "control"]
         if sig:
