@@ -16,6 +16,9 @@ Strategies, each paper-traded and scored under the devwatch exit rules:
   cadence; the fair comparison for ``leader``.
 - ``hot_early`` / ``second_wave`` (new launches in a hot theme, or right after
   one of its coins graduates) are retired: both lost more than random launches.
+- ``farm_relaunch`` / ``farm_first``: the XTEN/PREDICT farm-cycle pattern
+  (see ``farm_rule``), split by whether the ticker appeared on another mint in
+  the last 72 h; one position per coin at a time, sold by coin age 15 h.
 - ``cold``: a launch in a theme whose share is falling (one per 5 min); tests
   whether skipping fading themes helps.
 - ``control``: a random launch every 5 minutes.
@@ -244,6 +247,28 @@ def vol_rule(rec: dict) -> bool:
     )
 
 
+FARM_MAX_AGE_H = 12.0  # enter only this young
+FARM_EXIT_AGE_H = 15.0  # sell everything once the coin is this old
+RELAUNCH_WINDOW_H = 72
+
+
+def farm_rule(rec: dict) -> bool:
+    """The XTEN/PREDICT pattern: young, steady ~$170k pool, top volume, slow grind up.
+
+    Every relaunch of those two tickers paid +4-5% a trade while 6-12 h old and
+    was rugged around 18-24 h; this matches that window without naming them.
+    """
+    pc, tx = rec["pc"], rec["tx"]["m5"]
+    bs = tx["buys"] / max(tx["sells"], 1)
+    r = rec["ranks"].get("volume")
+    return (
+        6 <= rec["age_h"] <= FARM_MAX_AGE_H and 120_000 <= rec["liq"] <= 250_000
+        and 0.02 <= pc["h1"] <= 0.15 and 0.3 <= pc["h24"] <= 2.0
+        and abs(pc["m5"]) <= 0.015 and 1.0 <= bs <= 1.25
+        and r is not None and r <= 12 and rec.get("quote_is_sol", True)
+    )
+
+
 class GuardedPath(Path_):
     def __init__(self, kind: str, meta: dict) -> None:
         super().__init__(kind, meta)
@@ -267,6 +292,8 @@ class Narrative:
         self.wave: dict[str, dict] = {}  # theme -> {t, left}
         self.leader_seen: dict[str, float] = {}
         self.vol_seen: dict[str, float] = {}
+        self.farm_open: set[str] = set()
+        self.sym_mints: dict[str, dict[str, float]] = defaultdict(dict)
         self.last_control = 0.0
         self.last_cold = 0.0
         self.meta_gate = asyncio.Semaphore(4)
@@ -435,6 +462,19 @@ class Narrative:
                         break
                 else:
                     self.stats["leader_no_pick"] += 1
+                # Farm-cycle pattern: one open position per coin, re-entered after each close.
+                for r in pools:
+                    seen = self.sym_mints[r["symbol"].upper()]
+                    seen.setdefault(r["mint"], now)
+                    if not farm_rule(r) or r["mint"] in self.farm_open:
+                        continue
+                    relaunch = any(m != r["mint"] and now - t <= RELAUNCH_WINDOW_H * 3600
+                                   for m, t in seen.items())
+                    self.farm_open.add(r["mint"])
+                    self.fire("farm_relaunch" if relaunch else "farm_first",
+                              {"mint": r["mint"], "symbol": r["symbol"], "amm": True,
+                               "theme": "", "age_h": round(r["age_h"], 1),
+                               "exit_after_s": (FARM_EXIT_AGE_H - r["age_h"]) * 3600})
                 # Volume-leader rule with and without a hot theme: does the theme add anything?
                 vol_ok = [r for r in pools if vol_rule(r)
                           and now - self.vol_seen.get(r["mint"], 0) > LEADER_COOLDOWN]
@@ -490,7 +530,8 @@ class Narrative:
         self.open.append(p)
         p.mark(first)
         fails = 0
-        while time.time() - p.t0 < TRACK_SECONDS and len(p.exits) < len(VARIANTS):
+        limit = min(TRACK_SECONDS, meta.get("exit_after_s") or TRACK_SECONDS)
+        while time.time() - p.t0 < limit and len(p.exits) < len(VARIANTS):
             el = time.time() - p.t0
             await asyncio.sleep(4 if el < 600 else 15)
             mult = None
@@ -528,8 +569,11 @@ class Narrative:
                 continue
             fails = 0
             p.mark(mult)
+        if time.time() - p.t0 >= limit and limit < TRACK_SECONDS:
+            p.meta["age_exit"] = True
         p.finish()
         self.open.remove(p)
+        self.farm_open.discard(mint)
         self.record(p)
 
     def record(self, p: GuardedPath) -> None:
@@ -541,6 +585,8 @@ class Narrative:
             "theme": p.meta.get("theme") or "",
             "themes": p.meta.get("themes") or "",
             "after": p.meta.get("after") or "",
+            "age_h": p.meta.get("age_h", ""),
+            "age_exit": bool(p.meta.get("age_exit")),
             "venue": p.meta.get("venue"),
             "graduated": bool(p.meta.get("graduated")),
             "peak_mult": round(p.peak, 3),
@@ -582,7 +628,8 @@ class Narrative:
         by = defaultdict(list)
         for r in self.done:
             by[r["kind"]].append(r)
-        for kind in ("leader", "leader_any", "leader_vol", "vol_any", "cold", "control",
+        for kind in ("farm_relaunch", "farm_first", "leader", "leader_any", "leader_vol", "vol_any",
+                     "cold", "control",
                      "hot_early", "second_wave"):
             rs = by.get(kind, [])
             if not rs:
