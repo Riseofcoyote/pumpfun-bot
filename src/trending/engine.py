@@ -74,8 +74,18 @@ RUG_CRASH_TICKS = 3
 # and XTEN came back as a new mint each day, ground up 5%/hour, then dumped 70%.
 RELAUNCH_WINDOW_H = 72
 RELAUNCH_YOUNG_H = 12.0  # relaunched tickers stay tradable up to this pool age
+# A pool this calm over 1 h and 6 h cannot move enough in one hold to cover the
+# ~2% round trip; tokenized stocks, BTC/XMR wrappers and the like sit here.
+CALM_H1 = 0.03
+CALM_H6 = 0.06
 
 logger = logging.getLogger("trending")
+
+
+def is_calm(rec: dict) -> bool:
+    """True when the pool's 1 h and 6 h moves are both inside the calm band."""
+    pc = rec.get("pc") or {}
+    return abs(pc.get("h1", 0.0)) < CALM_H1 and abs(pc.get("h6", 0.0)) < CALM_H6
 
 
 def now_iso() -> str:
@@ -687,7 +697,7 @@ class Engine:
                 key = f"{s['id']}:{rec['mint']}"
                 if (s["id"], rec["mint"]) in held or self.cooldown.get(key, 0) > now:
                     continue
-                if rec["mint"] in relaunch:
+                if rec["mint"] in relaunch or is_calm(rec):
                     continue
                 if entry_signal(s, rec, self.prev_ranks.get(rec["pool"])):
                     wanted.append((s, rec))
