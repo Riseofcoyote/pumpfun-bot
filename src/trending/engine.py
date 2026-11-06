@@ -13,6 +13,7 @@ POPULATION, EVOLVE_HOURS.
 from __future__ import annotations
 
 import csv
+import gzip
 import json
 import logging
 import logging.handlers
@@ -1188,6 +1189,41 @@ class Engine:
         )
 
 
+SNAP_KEEP_DAYS = 14
+
+
+def record_snapshot(snap: dict[str, dict], now: float) -> None:
+    """Append one discovery snapshot to snapshots/YYYY-MM-DD.jsonl.gz for backtests.
+
+    One line per snapshot: {"t": unix s, "pools": [compact pool records]}. Files
+    older than SNAP_KEEP_DAYS are deleted. Failures are logged and ignored; the
+    recorder must never stop the paper engine.
+    """
+    try:
+        d = DATA / "snapshots"
+        d.mkdir(exist_ok=True)
+        pools = [
+            {
+                "mint": r["mint"], "pool": r["pool"], "sym": r["symbol"], "dex": r["dex"],
+                "sol": r["quote_is_sol"], "px": r["price"], "liq": round(r["liq"]),
+                "mcap": round(r["mcap"]), "age": round(r["age_h"], 2),
+                "pc": {k: round(v, 5) for k, v in r["pc"].items()},
+                "tx": r["tx"], "vol": {k: round(v) for k, v in r["vol"].items()},
+                "rk": r["ranks"],
+            }
+            for r in snap.values()
+        ]
+        day = datetime.fromtimestamp(now, UTC).strftime("%Y-%m-%d")
+        with gzip.open(d / f"{day}.jsonl.gz", "at") as f:
+            f.write(json.dumps({"t": round(now), "pools": pools}, separators=(",", ":")) + "\n")
+        cutoff = now - SNAP_KEEP_DAYS * 86400
+        for old in d.glob("*.jsonl.gz"):
+            if old.stat().st_mtime < cutoff:
+                old.unlink()
+    except (OSError, KeyError, TypeError, ValueError) as e:
+        logger.warning(f"snapshot record failed: {e}")
+
+
 def main() -> None:
     DATA.mkdir(parents=True, exist_ok=True)
     fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
@@ -1224,6 +1260,7 @@ def main() -> None:
         if t >= next_disc:
             snap = feeds.discover()
             if snap:
+                record_snapshot(snap, t)
                 eng.on_snapshot(snap, feeds.quotes)
             else:
                 logger.warning("empty discovery snapshot")
