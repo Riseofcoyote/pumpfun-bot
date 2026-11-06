@@ -269,6 +269,44 @@ def farm_rule(rec: dict) -> bool:
     )
 
 
+RESULT_FIELDS = [
+    "time_utc", "kind", "symbol", "mint", "theme", "themes", "after", "age_h",
+    "age_exit", "venue", "graduated", "peak_mult", "mult_m5", "mult_m15", "mult_m60",
+] + [f"{n}_{x}" for n, *_ in VARIANTS for x in ("net", "why")]  # fmt: skip
+
+
+def load_results(path: Path) -> list[dict]:
+    """Rows of results.csv, rewritten under RESULT_FIELDS if its header is older.
+
+    Rows were once appended under whatever header the file started with, so a
+    file can mix row widths; each row is mapped by its own width (the file's
+    header or RESULT_FIELDS) and rows matching neither are dropped and counted.
+    """
+    with path.open(newline="") as f:
+        raw = list(csv.reader(f))
+    if not raw:
+        return []
+    head, body = raw[0], raw[1:]
+    rows, bad = [], 0
+    for r in body:
+        if len(r) == len(RESULT_FIELDS) and (head == RESULT_FIELDS or len(head) != len(r)):
+            rows.append(dict(zip(RESULT_FIELDS, r, strict=True)))
+        elif len(r) == len(head):
+            rows.append(dict(zip(head, r, strict=True)))
+        else:
+            bad += 1
+    if head != RESULT_FIELDS or bad:
+        tmp = path.with_suffix(".csv.tmp")
+        with tmp.open("w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=RESULT_FIELDS, extrasaction="ignore")
+            w.writeheader()
+            for r in rows:
+                w.writerow({k: r.get(k, "") for k in RESULT_FIELDS})
+        tmp.replace(path)
+        logger.warning(f"[results] rewrote under current header: {len(rows)} kept, {bad} unreadable")
+    return [{k: r.get(k, "") for k in RESULT_FIELDS} for r in rows]
+
+
 class GuardedPath(Path_):
     def __init__(self, kind: str, meta: dict) -> None:
         super().__init__(kind, meta)
@@ -329,8 +367,7 @@ class Narrative:
                 logger.warning(f"state unreadable ({e}); fresh start")
         rp = DATA / "results.csv"
         if rp.exists():
-            with rp.open() as f:
-                self.done = list(csv.DictReader(f))
+            self.done = load_results(rp)
         self.heat.recompute(time.time())
 
     def spawn(self, coro) -> None:  # noqa: ANN001
@@ -601,7 +638,7 @@ class Narrative:
         path = DATA / "results.csv"
         new = not path.exists()
         with path.open("a", newline="") as f:
-            w = csv.DictWriter(f, fieldnames=list(row))
+            w = csv.DictWriter(f, fieldnames=RESULT_FIELDS)
             if new:
                 w.writeheader()
             w.writerow(row)

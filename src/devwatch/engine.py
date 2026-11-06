@@ -233,8 +233,10 @@ def curve_sell_lamports(vt: int, vq: int, tokens: float) -> float:
 class Path_:
     """A tracked launch: stake value multiple over time and per-variant exits."""
 
-    def __init__(self, kind: str, meta: dict) -> None:
+    def __init__(self, kind: str, meta: dict, *, late: bool = False) -> None:
+        """``late`` adds the DELAYED rules; other testers subclass without them."""
         self.kind, self.meta = kind, meta
+        self.late_rules = DELAYED if late else []
         self.t0 = time.time()
         self.mults: list[tuple[float, float]] = []
         self.peak = 0.0
@@ -267,7 +269,7 @@ class Path_:
         self._mark_late(el, mult)
 
     def _mark_late(self, el: float, mult: float) -> None:
-        for name, delay, floor, tp, sl, act, dist, hold in DELAYED:
+        for name, delay, floor, tp, sl, act, dist, hold in self.late_rules:
             if name in self.exits or el < delay:
                 continue
             if name not in self.late:
@@ -297,7 +299,7 @@ class Path_:
         el = time.time() - self.t0
         for name, *_ in VARIANTS:
             self.exits.setdefault(name, ("end", last - 1, el))
-        for name, *_ in DELAYED:
+        for name, *_ in self.late_rules:
             if name in self.late:
                 net = last / self.late[name][0] * LATE_COST - 1
                 self.exits.setdefault(name, ("end", net, el))
@@ -893,7 +895,9 @@ class DevWatch:
         tokens = curve_buy_tokens(cur["vt"], cur["vq"], stake)
         if tokens <= 0:
             return
-        path = Path_(kind, meta | {"entry_vq_sol": round(cur["vq"] / 1e9, 2)})
+        path = Path_(
+            kind, meta | {"entry_vq_sol": round(cur["vq"] / 1e9, 2)}, late=True
+        )
         self.open.append(path)
         fails = 0
         last_val = curve_sell_lamports(cur["vt"], cur["vq"], tokens)
