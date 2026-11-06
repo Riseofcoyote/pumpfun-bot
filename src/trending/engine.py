@@ -73,6 +73,7 @@ RUG_CRASH_TICKS = 3
 # A ticker seen on another mint within this window is a serial relaunch: PREDICT
 # and XTEN came back as a new mint each day, ground up 5%/hour, then dumped 70%.
 RELAUNCH_WINDOW_H = 72
+RELAUNCH_YOUNG_H = 12.0  # relaunched tickers stay tradable up to this pool age
 
 logger = logging.getLogger("trending")
 
@@ -663,7 +664,13 @@ class Engine:
         self.totals["snapshots"] += 1
         now = time.time()
         self._note_symbols(snap.values(), now)
-        relaunch = {r["mint"] for r in snap.values() if self.relaunched(r, now)}
+        # A relaunched ticker is skipped only once it is past RELAUNCH_YOUNG_H: the
+        # XTEN/PREDICT relaunches paid steadily while young and were rugged at
+        # 18-24 h, so blocking them outright also blocked the one steady winner.
+        relaunch = {
+            r["mint"] for r in snap.values()
+            if self.relaunched(r, now) and r["age_h"] > RELAUNCH_YOUNG_H
+        }
         logged = getattr(self, "_relaunch_logged", set())
         for r in snap.values():
             if r["mint"] in relaunch and r["mint"] not in logged:

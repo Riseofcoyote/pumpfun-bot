@@ -247,25 +247,27 @@ def vol_rule(rec: dict) -> bool:
     )
 
 
+FARM_MIN_AGE_H = 1.0
 FARM_MAX_AGE_H = 12.0  # enter only this young
 FARM_EXIT_AGE_H = 15.0  # sell everything once the coin is this old
 RELAUNCH_WINDOW_H = 72
 
 
 def farm_rule(rec: dict) -> bool:
-    """The XTEN/PREDICT pattern: young, steady ~$170k pool, top volume, slow grind up.
+    """The XTEN/PREDICT farm grind: steady ~$150-190k pool, slow climb, bot-steady flow.
 
-    Every relaunch of those two tickers paid +4-5% a trade while 6-12 h old and
-    was rugged around 18-24 h; this matches that window without naming them.
+    Each relaunch climbs from its first hour (not from hour 6 as first thought)
+    and was rugged at 18-24 h. On 12 h of snapshots this matched only those two
+    coins: 9 one-hour holds, all positive, median +3.5% after costs.
     """
     pc, tx = rec["pc"], rec["tx"]["m5"]
     bs = tx["buys"] / max(tx["sells"], 1)
-    r = rec["ranks"].get("volume")
     return (
-        6 <= rec["age_h"] <= FARM_MAX_AGE_H and 120_000 <= rec["liq"] <= 250_000
-        and 0.02 <= pc["h1"] <= 0.15 and 0.3 <= pc["h24"] <= 2.0
-        and abs(pc["m5"]) <= 0.015 and 1.0 <= bs <= 1.25
-        and r is not None and r <= 12 and rec.get("quote_is_sol", True)
+        FARM_MIN_AGE_H <= rec["age_h"] <= FARM_MAX_AGE_H
+        and 120_000 <= rec["liq"] <= 250_000 and rec["mcap"] <= 2e6
+        and 0.02 <= pc["h1"] <= 0.20 and pc["h24"] <= 2.5
+        and abs(pc["m5"]) <= 0.025 and 1.0 <= bs <= 1.25
+        and rec.get("quote_is_sol", True)
     )
 
 
