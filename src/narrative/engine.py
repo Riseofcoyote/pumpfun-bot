@@ -9,12 +9,13 @@ and presence in GeckoTerminal's trending lists.
 
 Strategies, each paper-traded and scored under the devwatch exit rules:
 
-- ``hot_early``: a new launch in a hot theme (at most one per theme per 3 min).
-- ``second_wave``: a launch in a theme within 30 min of one of its coins
-  graduating (at most 3 per graduation).
-- ``leader``: every 15 min, the best-ranked trending coin in the hottest theme.
+- ``leader``: every ~4 min, the best-ranked trending coin in the hottest theme.
+- ``leader_vol`` / ``vol_any``: a coin passing the trending tester's best
+  volume-leader rule, with and without a hot theme.
 - ``leader_any``: the best-ranked trending coin regardless of theme, same
   cadence; the fair comparison for ``leader``.
+- ``hot_early`` / ``second_wave`` (new launches in a hot theme, or right after
+  one of its coins graduates) are retired: both lost more than random launches.
 - ``cold``: a launch in a theme whose share is falling (one per 5 min); tests
   whether skipping fading themes helps.
 - ``control``: a random launch every 5 minutes.
@@ -65,7 +66,7 @@ ENTRY_DELAY = 2.0
 TRACK_SECONDS = 3600
 MAX_OPEN = 60
 HEAT_EVERY = 300
-LEADER_EVERY = 900
+LEADER_EVERY = 225
 CONTROL_EVERY = 300
 COLD_EVERY = 300
 HOT_GAP = 180  # seconds between hot_early buys in one theme
@@ -123,6 +124,22 @@ def words(text: str) -> list[str]:
     return WORD.findall(text.lower())
 
 
+VOWELS = set("aeiouy")
+FILLER = {"still", "lets", "their", "made", "make", "they", "them", "what", "when", "here",
+          "there", "like", "love", "life", "time", "real", "true", "very", "much", "more",
+          "most", "some", "been", "into", "over", "than", "then", "only", "back", "good",
+          "big", "little", "king", "queen", "baby", "world", "day", "night", "man", "girl",
+          "boy", "guy", "inu", "coin", "token", "pump", "test", "testing", "gas", "bond"}
+
+
+def is_word(w: str) -> bool:
+    """A plausible theme word: letters only, 4+ long, has a vowel, not filler."""
+    return (
+        len(w) >= 4 and w.isalpha() and bool(VOWELS & set(w))
+        and w not in STOPWORDS and w not in FILLER
+    )
+
+
 def themes_for(ws: list[str], emerging: set[str]) -> set[str]:
     out = {KEYWORD_THEME[w] for w in ws if w in KEYWORD_THEME}
     out |= {f"w:{w}" for w in ws if w in emerging}
@@ -152,9 +169,10 @@ class Heat:
         self.emerging: set[str] = set()
         self.table: dict[str, dict] = {}
 
-    def add_launch(self, t: float, ws: list[str], tags: set[str]) -> None:
+    def add_launch(self, t: float, ws: list[str], tags: set[str], creator: str = "") -> None:
         self.launches.append((t, frozenset(tags)))
-        self.word_events.append((t, frozenset(w for w in ws if len(w) >= 3 and w not in STOPWORDS)))
+        good = frozenset(w for w in ws if is_word(w))
+        self.word_events.append((t, good | {f"@{creator}"} if creator and good else good))
 
     def add_grad(self, t: float, tags: set[str]) -> None:
         self.grads.append((t, frozenset(tags)))
@@ -166,13 +184,21 @@ class Heat:
         n24 = max(len(self.launches), 1)
         n1 = max(sum(1 for t, _ in self.launches if t >= now - 3600), 1)
         w24, w1 = Counter(), Counter()
+        makers: dict[str, set[str]] = defaultdict(set)
         for t, ws in self.word_events:
-            w24.update(ws)
+            plain = [w for w in ws if not w.startswith("@")]
+            w24.update(plain)
             if t >= now - 3600:
-                w1.update(ws)
+                w1.update(plain)
+                who = next((w for w in ws if w.startswith("@")), None)
+                for w in plain:
+                    makers[w].add(who or f"anon{t}")
+        # A real emerging theme is used by several different creators; one spammer
+        # relaunching the same name is not.
         self.emerging = {
             w for w, c in w1.items()
-            if c >= 6 and (c / n1) >= 4 * ((w24[w] + 1) / n24) and w not in KEYWORD_THEME
+            if c >= 6 and len(makers[w]) >= 4 and (c / n1) >= 4 * ((w24[w] + 1) / n24)
+            and w not in KEYWORD_THEME
         }
         c24, c1 = Counter(), Counter()
         for t, tags in self.launches:
@@ -205,6 +231,19 @@ class Heat:
         return {t for t, v in self.table.items() if v["cold"]}
 
 
+def vol_rule(rec: dict) -> bool:
+    """The trending tester's best volume-leader rule (zrhx0e): calm, liquid, steady."""
+    pc, tx, vol = rec["pc"], rec["tx"]["m5"], rec["vol"]
+    r = rec["ranks"].get("volume")
+    return (
+        r is not None and r <= 25 and rec["liq"] >= 100_000 and rec["mcap"] < 200e6
+        and 6 <= rec["age_h"] <= 5000 and -0.02 <= pc["m5"] <= 0.02
+        and -0.05 <= pc["h1"] <= 0.15 and pc.get("h6", 0.0) > -0.20
+        and 0.0 <= pc["h24"] <= 2.0 and tx["buys"] / max(tx["sells"], 1) >= 0.6
+        and vol["m5"] >= 1_000
+    )
+
+
 class GuardedPath(Path_):
     def __init__(self, kind: str, meta: dict) -> None:
         super().__init__(kind, meta)
@@ -227,6 +266,7 @@ class Narrative:
         self.last_hot: dict[str, float] = {}
         self.wave: dict[str, dict] = {}  # theme -> {t, left}
         self.leader_seen: dict[str, float] = {}
+        self.vol_seen: dict[str, float] = {}
         self.last_control = 0.0
         self.last_cold = 0.0
         self.meta_gate = asyncio.Semaphore(4)
@@ -295,7 +335,7 @@ class Narrative:
         ws = words(f"{name} {sym}")
         tags = themes_for(ws + words(desc), self.heat.emerging)
         now = time.time()
-        self.heat.add_launch(now, ws, tags)
+        self.heat.add_launch(now, ws, tags, str(msg.get("traderPublicKey") or ""))
         self.tags[mint] = {"t": now, "tags": sorted(tags), "sym": sym[:16], "name": name[:40]}
         self.stats["launches"] += 1
         if tags:
@@ -309,15 +349,7 @@ class Narrative:
             self.stats["skipped_capacity"] += 1
             return
         hot = [t for t in self.heat.hot() if t in tags]
-        if hot and now - self.last_hot.get(hot[0], 0) >= HOT_GAP:
-            self.last_hot[hot[0]] = now
-            self.fire("hot_early", meta | {"theme": hot[0]})
-        for th in tags:
-            w = self.wave.get(th)
-            if w and now - w["t"] <= WAVE_WINDOW and w["left"] > 0:
-                w["left"] -= 1
-                self.fire("second_wave", meta | {"theme": th, "after": w["sym"]})
-                break
+        # hot_early and second_wave are retired: both did worse than random launches.
         cold = [t for t in tags if t in self.heat.cold()]
         if cold and not hot and now - self.last_cold >= COLD_EVERY:
             self.last_cold = now
@@ -393,7 +425,8 @@ class Narrative:
                     self.leader_seen[top["mint"]] = now
                     self.fire("leader_any", {"mint": top["mint"], "symbol": top["symbol"],
                                              "theme": "|".join(sorted(self.pool_tags(top))), "amm": True})
-                for th in self.heat.hot():
+                hot = self.heat.hot()
+                for th in hot:
                     pick = next((r for r in fresh if th in self.pool_tags(r)), None)
                     if pick:
                         self.leader_seen[pick["mint"]] = now
@@ -402,6 +435,20 @@ class Narrative:
                         break
                 else:
                     self.stats["leader_no_pick"] += 1
+                # Volume-leader rule with and without a hot theme: does the theme add anything?
+                vol_ok = [r for r in pools if vol_rule(r)
+                          and now - self.vol_seen.get(r["mint"], 0) > LEADER_COOLDOWN]
+                if vol_ok:
+                    top = vol_ok[0]
+                    self.vol_seen[top["mint"]] = now
+                    self.fire("vol_any", {"mint": top["mint"], "symbol": top["symbol"],
+                                          "theme": "|".join(sorted(self.pool_tags(top))), "amm": True})
+                    themed = next((r for r in vol_ok if self.pool_tags(r) & set(hot)), None)
+                    if themed:
+                        self.vol_seen[themed["mint"]] = now
+                        self.fire("leader_vol", {"mint": themed["mint"], "symbol": themed["symbol"],
+                                                 "theme": "|".join(sorted(self.pool_tags(themed) & set(hot))),
+                                                 "amm": True})
             except Exception:  # noqa: BLE001
                 logger.exception("[leader] failed")
             await asyncio.sleep(LEADER_EVERY)
@@ -535,7 +582,8 @@ class Narrative:
         by = defaultdict(list)
         for r in self.done:
             by[r["kind"]].append(r)
-        for kind in ("hot_early", "second_wave", "leader", "leader_any", "cold", "control"):
+        for kind in ("leader", "leader_any", "leader_vol", "vol_any", "cold", "control",
+                     "hot_early", "second_wave"):
             rs = by.get(kind, [])
             if not rs:
                 continue
@@ -544,13 +592,15 @@ class Narrative:
                 vals = [float(r[f"{e}_net"]) for r in rs]
                 cells.append(f"{statistics.mean(vals):+5.0%}/{statistics.median(vals):+4.0%}/{sum(v > 0 for v in vals) / len(vals):3.0%}")
             p2 = sum(float(r["peak_mult"]) >= 2 for r in rs) / len(rs)
-            lines.append(f"  {kind:13} {len(rs):4}  {p2:6.0%}  " + "  ".join(f"{c:>18}" for c in cells))
+            label = f"{kind}*" if kind in ("hot_early", "second_wave") else kind
+            lines.append(f"  {label:13} {len(rs):4}  {p2:6.0%}  " + "  ".join(f"{c:>18}" for c in cells))
+        lines.append("  (* retired; history only)")
         th_rows = defaultdict(list)
         for r in self.done:
-            if r["kind"] in ("hot_early", "second_wave", "leader") and r["theme"]:
+            if r["kind"] in ("leader", "leader_vol") and r["theme"]:
                 th_rows[r["theme"]].append(float(r["trail_net"]))
         if th_rows:
-            lines.append("\nBy theme (hot_early + second_wave + leader), trail exit mean / n:")
+            lines.append("\nBy theme (leader + leader_vol), trail exit mean / n:")
             for th, vals in sorted(th_rows.items(), key=lambda x: -len(x[1]))[:15]:
                 lines.append(f"  {th:18} {statistics.mean(vals):+6.1%}  n {len(vals)}")
         return "\n".join(lines)
