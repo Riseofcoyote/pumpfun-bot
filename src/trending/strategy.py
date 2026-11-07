@@ -27,6 +27,9 @@ MAX_ENTRY_M5 = 0.10
 # every family, and held all but a handful of the rugs (farm tokens pulled at
 # the top of their cycle).
 MAX_ENTRY_H24 = 2.0
+# Entries into a pool already up more than 15% over the last hour lost about 9%
+# net (7% before costs) in every family and on every day, across 30 tokens.
+MAX_ENTRY_H1 = 0.15
 
 # name -> (low, high, kind). kind "f" float, "i" int, "log" float sampled in log space.
 RANGES: dict[str, tuple[float, float, str]] = {
@@ -37,8 +40,8 @@ RANGES: dict[str, tuple[float, float, str]] = {
     "max_rank": (8, 60, "i"),
     "m5_min": (-0.10, 0.05, "f"),
     "m5_max": (0.02, 0.10, "f"),
-    "h1_min": (-0.30, 0.40, "f"),
-    "h1_max": (0.05, 1.0, "log"),
+    "h1_min": (-0.30, 0.10, "f"),
+    "h1_max": (0.05, MAX_ENTRY_H1, "log"),
     "h6_min": (-0.5, 2.0, "f"),
     "h24_min": (-0.9, 1.5, "f"),
     "h24_max": (0.2, MAX_ENTRY_H24, "log"),
@@ -71,7 +74,7 @@ LOOSE = {
     "min_m5_vol": 500.0,
     "buy_ratio_min": 0.6,
     "h1_min": -0.30,
-    "h1_max": 1.0,
+    "h1_max": MAX_ENTRY_H1,
 }
 
 
@@ -128,6 +131,7 @@ def _repair(s: dict) -> None:
         s["m5_max"] = min(s["m5_max"], 0.0)
         s["m5_min"] = min(s["m5_min"], -0.02)
         s["h1_min"] = max(s["h1_min"], 0.05)
+        s["h1_max"] = max(s["h1_max"], s["h1_min"] + 0.05)
     if s["family"] == "fresh_trend" or s["source"] == "trend5m":
         # The rank cap has to leave a band above the hot-rank skip.
         s["max_rank"] = max(s["max_rank"], s["min_t5_rank"] + 5)
@@ -194,7 +198,7 @@ def entry_signal(s: dict, rec: dict, prev_ranks: dict[str, int] | None) -> bool:
         if r is None or r > s["max_rank"]:
             return False
     pc, tx, vol = rec["pc"], rec["tx"]["m5"], rec["vol"]
-    if pc["m5"] > MAX_ENTRY_M5 or pc["h24"] > MAX_ENTRY_H24:
+    if pc["m5"] > MAX_ENTRY_M5 or pc["h24"] > MAX_ENTRY_H24 or pc["h1"] > MAX_ENTRY_H1:
         return False
     t5 = ranks.get("trend5m")
     if t5 is not None and t5 < s.get("min_t5_rank", 1.0):
