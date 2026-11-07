@@ -1,0 +1,20 @@
+# Shows how Jupiter and DexScreener see one token (routes, price impact). Read-only.
+name: Jupiter probe
+on:
+  workflow_dispatch:
+    inputs:
+      mint:
+        description: Token mint
+        required: true
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python tools/jup_probe.py "${{ inputs.mint }}"
