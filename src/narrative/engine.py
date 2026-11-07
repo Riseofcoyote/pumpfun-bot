@@ -550,7 +550,7 @@ class Narrative:
                 young = [r for r in pools if r["age_h"] <= YOUNG_MAX_AGE_H and r["pc"]["h24"] <= 1.0
                          and r["pc"]["m5"] <= 0.02 and r.get("quote_is_sol", True)
                          and now - self.young_seen.get(r["mint"], 0) > LEADER_COOLDOWN]
-                for r in young[:YOUNG_PER_ROUND]:
+                for r in young[:0]:  # retired: live it lost (median -3%..-12%, 26-46% wins)
                     self.young_seen[r["mint"]] = now
                     self.fire("young_listed", {"mint": r["mint"], "pool": r["pool"], "symbol": r["symbol"],
                                                "theme": "", "amm": True, "age_h": round(r["age_h"], 2)})
@@ -787,10 +787,15 @@ class Narrative:
         for r in self.done:
             if r["kind"] in amm_kinds and not r.get("px_src"):
                 continue  # priced from Jupiter before pool pricing; stale prints looked like holds
+            try:
+                if float(r.get("peak_mult") or 0) > MAX_MULT:
+                    continue  # a bad print from before the 50x cap
+            except ValueError:
+                pass
             by[r["kind"]].append(r)
-        for kind in ("farm_relaunch", "farm_first", "young_listed", "leader", "leader_any", "leader_vol", "vol_any",
+        for kind in ("farm_relaunch", "farm_first", "leader", "leader_any", "leader_vol", "vol_any",
                      "cold", "control",
-                     "hot_early", "second_wave"):
+                     "hot_early", "second_wave", "young_listed"):
             rs = by.get(kind, [])
             if not rs:
                 continue
@@ -799,7 +804,7 @@ class Narrative:
                 vals = [float(r[f"{e}_net"]) for r in rs]
                 cells.append(f"{statistics.mean(vals):+5.0%}/{statistics.median(vals):+4.0%}/{sum(v > 0 for v in vals) / len(vals):3.0%}")
             p2 = sum(float(r["peak_mult"]) >= 2 for r in rs) / len(rs)
-            label = f"{kind}*" if kind in ("hot_early", "second_wave") else kind
+            label = f"{kind}*" if kind in ("hot_early", "second_wave", "young_listed") else kind
             lines.append(f"  {label:13} {len(rs):4}  {p2:6.0%}  " + "  ".join(f"{c:>18}" for c in cells))
         lines.append("  (* retired; history only. Trending-coin rows count only pool-priced trades.)")
         th_rows = defaultdict(list)
