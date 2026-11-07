@@ -13,10 +13,12 @@ jobs:
     steps:
       - uses: superfly/flyctl-actions/setup-flyctl@master
       - run: |
-          flyctl ssh console -a pumpfun-bot-w1afdq -C "sh -c 'cd /data/trades/trending && tar czf - trades*.csv snapshots 2>/dev/null | base64 -w0'" > out.b64
+          flyctl ssh console -a pumpfun-bot-w1afdq -C "sh -c 'cd /data/trades/trending && tar czf - trades*.csv state.json snapshots 2>/dev/null | base64 -w0'" > out.b64
           base64 -d out.b64 > trending-export.tgz
           tar tzvf trending-export.tgz | tail -20
-          echo "BEGIN_EXPORT"; cat out.b64; echo; echo "END_EXPORT"
+          # One giant line is dropped from the job log; wrap it so it can be rebuilt by
+          # joining the lines between the markers.
+          echo "BEGIN_EXPORT"; fold -w 4000 out.b64; echo; echo "END_EXPORT"
       - uses: actions/upload-artifact@v4
         with:
           name: trending-export
