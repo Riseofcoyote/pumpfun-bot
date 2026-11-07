@@ -21,7 +21,7 @@ primary_region = "ewr"
   NARRATIVE_DATA_DIR = "/data/trades/narrative"
   FARMLIVE_DATA_DIR = "/data/trades/farmlive"
   # farmlive trades real money only when FARMLIVE_ENABLED is "1".
-  FARMLIVE_ENABLED = "0"
+  FARMLIVE_ENABLED = "1"
   FARMLIVE_SIZE_SOL = "0.1"
   FARMLIVE_MAX_POSITIONS = "2"
   FARMLIVE_SELFTEST_SOL = "0.01"
