@@ -65,3 +65,7 @@ jobs:
         if: env.FLY_API_TOKEN != ''
         run: |
           flyctl ssh console -a "$APP" -C "sh -c 'cat /data/trades/narrative/report.txt; echo === LOG; grep -a -E \"WARNING|ERROR|heat|status\" /data/trades/narrative/engine.log | grep -v signal | tail -60; echo === RESULTS; cat /data/trades/narrative/results.csv'" || true
+      - name: Volume-bot patterns - report and log highlights
+        if: env.FLY_API_TOKEN != ''
+        run: |
+          flyctl ssh console -a "$APP" -C "sh -c 'cat /data/trades/volbot/report.txt; echo === LOG; grep -a -E \"WARNING|ERROR|status\" /data/trades/volbot/engine.log | tail -40; echo === FILES; ls -la /data/trades/volbot'" || true

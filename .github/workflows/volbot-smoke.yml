@@ -1,0 +1,33 @@
+# Runs the volume-bot pattern paper tester for a few minutes against live data
+# (public WSS + PumpPortal). Moves no funds and uses no secrets.
+name: Volume-bot smoke test
+on:
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: "How long to run"
+        default: "8"
+permissions:
+  contents: read
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -q websockets
+      - name: Run
+        working-directory: src
+        env:
+          VOLBOT_DATA_DIR: /tmp/volbot
+          VOLBOT_ADMIT_GAP: "3"
+        run: timeout ${{ inputs.minutes }}m python -m volbot.engine || true
+      - name: Results
+        run: |
+          cat /tmp/volbot/report.txt || true
+          echo "=== log"; grep -a -v "^\s*$" /tmp/volbot/engine.log | tail -60
+          echo "=== files"; ls -la /tmp/volbot
+          head -c 1500 /tmp/volbot/tapes.jsonl || true
