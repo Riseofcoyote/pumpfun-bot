@@ -49,7 +49,7 @@ LEARN_EVERY = 900
 WATCH_EVERY = 30
 BUY_SLIPPAGE_BPS = 300
 SELL_SLIPPAGE_BPS = 800
-MAX_IMPACT = 0.03
+MAX_FILL_COST = 0.06  # fee + impact vs the pool's price; the pool fee alone is ~1.25%
 SOL_MINT = "So11111111111111111111111111111111111111112"
 JUP_SWAP = "https://lite-api.jup.ag/swap/v1"
 PUBLIC_RPC = "https://api.mainnet-beta.solana.com"
@@ -209,6 +209,29 @@ class FarmLive:
                 break
         return sig, status
 
+    def decimals(self, mint: str) -> int | None:
+        doc = self.chain.call("getTokenSupply", [mint])
+        try:
+            return int(doc["result"]["value"]["decimals"])
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def fill_cost(self, pool: str | None, mint: str, lamports: int, out_raw: int) -> float | None:
+        """1 - quoted tokens / tokens at the pool's price; None if either is unknown."""
+        if not pool:
+            return None
+        doc = feeds.get_json(f"{feeds.DS}/pairs/solana/{pool}", feeds.DS_GATE)
+        pair = ((doc or {}).get("pairs") or [None])[0] or (doc or {}).get("pair")
+        dec = self.decimals(mint)
+        try:
+            px_sol = float(pair["priceNative"])  # SOL per whole token
+        except (TypeError, KeyError, ValueError):
+            return None
+        if dec is None or px_sol <= 0:
+            return None
+        fair = lamports / 1e9 / px_sol * 10**dec
+        return 1 - out_raw / fair
+
     def buy(self, r: dict, size_sol: float, note: str = "") -> dict | None:
         mint, sym = r["mint"], r["symbol"]
         lamports = int(size_sol * 1e9)
@@ -216,9 +239,13 @@ class FarmLive:
         if not q:
             logger.warning(f"[buy] {sym} no quote")
             return None
-        impact = abs(float(q.get("priceImpactPct") or 0))
-        if impact > MAX_IMPACT:
-            logger.warning(f"[buy] {sym} skipped: price impact {impact:.1%}")
+        # Jupiter's priceImpactPct is measured against its own price index, which for
+        # a relaunched ticker can be a dead pool's price (95.7% "impact" on a fill
+        # that really cost ~1.7%). Judge the fill against the pool's own price instead.
+        cost = self.fill_cost(r.get("pool"), mint, lamports, int(q["outAmount"]))
+        if cost is None or cost > MAX_FILL_COST:
+            shown = "unknown" if cost is None else f"{cost:.1%}"
+            logger.warning(f"[buy] {sym} skipped: fill cost vs pool price {shown}")
             return None
         if not ENABLED:
             logger.warning(f"[dry-run] would buy {size_sol} SOL of {sym} {mint} (quote {q['outAmount']} units)")
