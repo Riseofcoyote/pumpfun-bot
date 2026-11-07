@@ -19,6 +19,12 @@ primary_region = "ewr"
   TRENDING_DATA_DIR = "/data/trades/trending"
   DEVWATCH_DATA_DIR = "/data/trades/devwatch"
   NARRATIVE_DATA_DIR = "/data/trades/narrative"
+  FARMLIVE_DATA_DIR = "/data/trades/farmlive"
+  # farmlive trades real money only when FARMLIVE_ENABLED is "1".
+  FARMLIVE_ENABLED = "0"
+  FARMLIVE_SIZE_SOL = "0.1"
+  FARMLIVE_MAX_POSITIONS = "2"
+  FARMLIVE_SELFTEST_SOL = "0.01"
   VOLBOT_DATA_DIR = "/data/trades/volbot"
   PAPER_SIZE_SOL = "0.2"
 
@@ -26,7 +32,7 @@ primary_region = "ewr"
 # exits, the machine restarts all of them. src/kolwatch is retired (copying KOL buys lost money). Neither spends SOL or loads the wallet. To go back to the new-coin sniper, use:
 #   app = "sh -c 'mkdir -p /data/trades /data/logs && exec uv run --no-sync pump_bot'"
 [processes]
-  app = "bash -c 'mkdir -p /data/trades/trending /data/trades/devwatch /data/trades/narrative /data/trades/volbot /data/logs && cd /app/src && /app/.venv/bin/python -m trending.engine & cd /app/src && /app/.venv/bin/python -m devwatch.engine & cd /app/src && /app/.venv/bin/python -m narrative.engine & cd /app/src && /app/.venv/bin/python -m volbot.engine & wait -n; exit 1'"
+  app = "bash -c 'mkdir -p /data/trades/trending /data/trades/devwatch /data/trades/narrative /data/trades/volbot /data/trades/farmlive /data/logs && cd /app/src && /app/.venv/bin/python -m trending.engine & cd /app/src && /app/.venv/bin/python -m devwatch.engine & cd /app/src && /app/.venv/bin/python -m narrative.engine & cd /app/src && /app/.venv/bin/python -m volbot.engine & cd /app/src && /app/.venv/bin/python -m farmlive.engine & wait -n; exit 1'"
 
 # The bot exits with code 0 if its trading process stops, and Fly's default
 # (on-failure) does not restart on code 0. Always restart instead.

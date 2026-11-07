@@ -69,3 +69,7 @@ jobs:
         if: env.FLY_API_TOKEN != ''
         run: |
           flyctl ssh console -a "$APP" -C "sh -c 'cat /data/trades/volbot/report.txt; echo === LOG; grep -a -E \"WARNING|ERROR|status\" /data/trades/volbot/engine.log | tail -40; echo === FILES; ls -la /data/trades/volbot'" || true
+      - name: Farm live trader - log and trades
+        if: env.FLY_API_TOKEN != ''
+        run: |
+          flyctl ssh console -a "$APP" -C "sh -c 'grep -a -E \"WARNING|ERROR\" /data/trades/farmlive/engine.log | tail -60; echo === TRADES; cat /data/trades/farmlive/trades.csv; echo === STATE; cat /data/trades/farmlive/state.json'" || true
