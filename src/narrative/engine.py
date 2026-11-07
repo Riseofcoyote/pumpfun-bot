@@ -42,6 +42,7 @@ import statistics
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections import Counter, defaultdict, deque
 from pathlib import Path
@@ -247,6 +248,10 @@ def vol_rule(rec: dict) -> bool:
     )
 
 
+MAX_MULT = 50.0
+SPIKE_CONFIRM = 3
+FARM_SEED_SYMBOLS = {"XTEN", "PREDICT"}
+FARM_SEARCH_EVERY = 600
 FARM_MIN_AGE_H = 1.0
 FARM_MAX_AGE_H = 12.0  # enter only this young
 FARM_EXIT_AGE_H = 15.0  # sell everything once the coin is this old
@@ -309,6 +314,37 @@ def load_results(path: Path) -> list[dict]:
     return [{k: r.get(k, "") for k in RESULT_FIELDS} for r in rows]
 
 
+def ds_search_pools(symbol: str) -> list[dict]:
+    """Solana SOL-quoted pools whose base ticker is ``symbol``, shaped like feeds.discover().
+
+    Uses DexScreener search, so a farm relaunch is seen from its first hour
+    instead of when it reaches a trending list. Empty list on any failure.
+    """
+    doc = feeds.get_json(
+        f"{feeds.DS}/search?q={urllib.parse.quote(symbol)}", feeds.DS_GATE
+    )
+    out = []
+    now_ms = time.time() * 1000
+    for pr in (doc or {}).get("pairs") or []:
+        base, quote = pr.get("baseToken") or {}, pr.get("quoteToken") or {}
+        if pr.get("chainId") != "solana" or str(base.get("symbol", "")).upper() != symbol:
+            continue
+        if quote.get("address") != SOL_MINT or not pr.get("pairCreatedAt"):
+            continue
+        pc = pr.get("priceChange") or {}
+        tx = (pr.get("txns") or {}).get("m5") or {}
+        out.append({
+            "mint": base.get("address"), "pool": pr.get("pairAddress"), "symbol": symbol,
+            "liq": feeds._f((pr.get("liquidity") or {}).get("usd")),
+            "mcap": feeds._f(pr.get("marketCap") or pr.get("fdv")),
+            "age_h": (now_ms - float(pr["pairCreatedAt"])) / 3.6e6,
+            "pc": {k: feeds._f(pc.get(k)) / 100 for k in ("m5", "h1", "h6", "h24")},
+            "tx": {"m5": {"buys": int(feeds._f(tx.get("buys"))), "sells": int(feeds._f(tx.get("sells")))}},
+            "quote_is_sol": True, "ranks": {}, "dex": pr.get("dexId"),
+        })
+    return out
+
+
 class GuardedPath(Path_):
     def __init__(self, kind: str, meta: dict) -> None:
         super().__init__(kind, meta)
@@ -333,6 +369,7 @@ class Narrative:
         self.leader_seen: dict[str, float] = {}
         self.vol_seen: dict[str, float] = {}
         self.farm_open: set[str] = set()
+        self.farm_symbols: set[str] = set(FARM_SEED_SYMBOLS)
         self.sym_mints: dict[str, dict[str, float]] = defaultdict(dict)
         self.last_control = 0.0
         self.last_cold = 0.0
@@ -507,13 +544,7 @@ class Narrative:
                     seen.setdefault(r["mint"], now)
                     if not farm_rule(r) or r["mint"] in self.farm_open:
                         continue
-                    relaunch = any(m != r["mint"] and now - t <= RELAUNCH_WINDOW_H * 3600
-                                   for m, t in seen.items())
-                    self.farm_open.add(r["mint"])
-                    self.fire("farm_relaunch" if relaunch else "farm_first",
-                              {"mint": r["mint"], "pool": r["pool"], "symbol": r["symbol"], "amm": True,
-                               "theme": "", "age_h": round(r["age_h"], 1),
-                               "exit_after_s": (FARM_EXIT_AGE_H - r["age_h"]) * 3600})
+                    self.farm_enter(r, now)
                 # Volume-leader rule with and without a hot theme: does the theme add anything?
                 vol_ok = [r for r in pools if vol_rule(r)
                           and now - self.vol_seen.get(r["mint"], 0) > LEADER_COOLDOWN]
@@ -531,6 +562,36 @@ class Narrative:
             except Exception:  # noqa: BLE001
                 logger.exception("[leader] failed")
             await asyncio.sleep(LEADER_EVERY)
+
+    def farm_enter(self, r: dict, now: float) -> None:
+        seen = self.sym_mints[r["symbol"].upper()]
+        seen.setdefault(r["mint"], now)
+        relaunch = any(m != r["mint"] and now - t <= RELAUNCH_WINDOW_H * 3600 for m, t in seen.items())
+        self.farm_open.add(r["mint"])
+        self.farm_symbols.add(r["symbol"].upper())
+        self.fire("farm_relaunch" if relaunch else "farm_first",
+                  {"mint": r["mint"], "pool": r["pool"], "symbol": r["symbol"], "amm": True,
+                   "theme": "", "age_h": round(r["age_h"], 1),
+                   "exit_after_s": (FARM_EXIT_AGE_H - r["age_h"]) * 3600})
+
+    async def farm_search_loop(self) -> None:
+        """Look up every known farm ticker directly, so a new mint is caught young."""
+        while True:
+            for sym in sorted(self.farm_symbols):
+                try:
+                    pools = await asyncio.to_thread(ds_search_pools, sym)
+                except Exception:  # noqa: BLE001
+                    logger.exception(f"[farm] search {sym} failed")
+                    continue
+                now = time.time()
+                for r in pools:
+                    self.sym_mints[sym].setdefault(r["mint"], now - r["age_h"] * 3600)
+                    if r["mint"] in self.farm_open or not farm_rule(r):
+                        continue
+                    logger.warning(f"[farm] {sym} {r['mint'][:8]} age {r['age_h']:.1f}h matches")
+                    self.farm_enter(r, now)
+                self.stats["farm_searches"] += 1
+            await asyncio.sleep(FARM_SEARCH_EVERY)
 
     # ----- paper trade
     async def track(self, kind: str, meta: dict) -> None:
@@ -615,10 +676,18 @@ class Narrative:
                 if px:
                     base = p.meta.get("grad_base", (1 - GRAD_SIDE - LATENCY) ** 2)
                     mult = base * px / entry_px
-                    if p.last > 0 and (mult > 3 * p.last or mult < p.last / 3):
-                        pend = p.meta.get("spike")
-                        if pend is None or abs(mult / pend - 1) > 0.3:
-                            p.meta["spike"] = mult
+                    if mult > MAX_MULT:
+                        self.stats["price_over_cap"] += 1
+                        mult = None  # not a fill a 0.2 SOL position could get in an hour
+                    elif p.last > 0 and (mult > 3 * p.last or mult < p.last / 3):
+                        # A jump must repeat on SPIKE_CONFIRM reads in a row before it counts.
+                        pend, seen = p.meta.get("spike", (None, 0))
+                        if pend is not None and abs(mult / pend - 1) <= 0.3:
+                            seen += 1
+                        else:
+                            pend, seen = mult, 1
+                        if seen < SPIKE_CONFIRM:
+                            p.meta["spike"] = (pend, seen)
                             self.stats["price_spikes_held"] += 1
                             mult = None
                         else:
@@ -764,7 +833,9 @@ async def amain() -> None:
             except Exception:  # noqa: BLE001
                 logger.exception("save failed")
 
-    await asyncio.gather(heater(), saver(), nv.leader_loop(), nv.pumpportal_loop(websockets))
+    await asyncio.gather(
+        heater(), saver(), nv.leader_loop(), nv.pumpportal_loop(websockets), nv.farm_search_loop()
+    )
 
 
 def main() -> None:
