@@ -21,6 +21,8 @@ Strategies, each paper-traded and scored under the devwatch exit rules:
   the last 72 h; one position per coin at a time, sold by coin age 15 h.
 - ``young_listed``: pools under 1 h old already on a trending list (at most 2
   per round), priced from the pool so a vanished pool counts as a total loss.
+- ``farm_hold``: one entry per farm coin held until it is 15 h old, or sold
+  after a 20% fall from its peak (column long_net).
 - ``cold``: a launch in a theme whose share is falling (one per 5 min); tests
   whether skipping fading themes helps.
 - ``control``: a random launch every 5 minutes.
@@ -251,6 +253,7 @@ def vol_rule(rec: dict) -> bool:
 
 
 MAX_MULT = 50.0
+LONG_TRAIL = 0.20  # farm_hold sells after a 20% fall from its peak
 YOUNG_MAX_AGE_H = 1.0
 YOUNG_PER_ROUND = 2
 SPIKE_CONFIRM = 3
@@ -283,7 +286,7 @@ def farm_rule(rec: dict) -> bool:
 RESULT_FIELDS = [
     "time_utc", "kind", "symbol", "mint", "theme", "themes", "after", "age_h",
     "age_exit", "px_src", "lost_price", "venue", "graduated", "peak_mult", "mult_m5", "mult_m15", "mult_m60",
-] + [f"{n}_{x}" for n, *_ in VARIANTS for x in ("net", "why")]  # fmt: skip
+] + [f"{n}_{x}" for n, *_ in VARIANTS for x in ("net", "why")] + ["long_net", "long_why", "held_h"]  # fmt: skip
 
 
 def load_results(path: Path) -> list[dict]:
@@ -373,6 +376,7 @@ class Narrative:
         self.leader_seen: dict[str, float] = {}
         self.vol_seen: dict[str, float] = {}
         self.farm_open: set[str] = set()
+        self.farm_hold_seen: set[str] = set()
         self.young_seen: dict[str, float] = {}
         self.farm_symbols: set[str] = set(FARM_SEED_SYMBOLS)
         self.sym_mints: dict[str, dict[str, float]] = defaultdict(dict)
@@ -585,10 +589,14 @@ class Narrative:
         relaunch = any(m != r["mint"] and now - t <= RELAUNCH_WINDOW_H * 3600 for m, t in seen.items())
         self.farm_open.add(r["mint"])
         self.farm_symbols.add(r["symbol"].upper())
-        self.fire("farm_relaunch" if relaunch else "farm_first",
-                  {"mint": r["mint"], "pool": r["pool"], "symbol": r["symbol"], "amm": True,
-                   "theme": "", "age_h": round(r["age_h"], 1),
-                   "exit_after_s": (FARM_EXIT_AGE_H - r["age_h"]) * 3600})
+        meta = {"mint": r["mint"], "pool": r["pool"], "symbol": r["symbol"], "amm": True,
+                "theme": "", "age_h": round(r["age_h"], 1),
+                "exit_after_s": (FARM_EXIT_AGE_H - r["age_h"]) * 3600}
+        self.fire("farm_relaunch" if relaunch else "farm_first", dict(meta))
+        if r["mint"] not in self.farm_hold_seen:
+            # One entry held to the age cutoff: saves the ~3% round trip paid per hourly re-entry.
+            self.farm_hold_seen.add(r["mint"])
+            self.fire("farm_hold", meta | {"long": True})
 
     async def farm_search_loop(self) -> None:
         """Look up every known farm ticker directly, so a new mint is caught young."""
@@ -667,8 +675,15 @@ class Narrative:
         self.open.append(p)
         p.mark(first)
         fails = 0
-        limit = min(TRACK_SECONDS, meta.get("exit_after_s") or TRACK_SECONDS)
-        while time.time() - p.t0 < limit and len(p.exits) < len(VARIANTS):
+        long = bool(meta.get("long"))
+        if long:
+            limit = max(meta.get("exit_after_s") or TRACK_SECONDS, 60)
+        else:
+            limit = min(TRACK_SECONDS, meta.get("exit_after_s") or TRACK_SECONDS)
+        while time.time() - p.t0 < limit and (long or len(p.exits) < len(VARIANTS)):
+            if long and p.last <= p.peak * (1 - LONG_TRAIL):
+                p.meta["long_exit"] = ("trail", p.last - 1)
+                break
             el = time.time() - p.t0
             await asyncio.sleep(4 if el < 600 else 15)
             mult = None
@@ -724,8 +739,10 @@ class Narrative:
                 continue
             fails = 0
             p.mark(mult)
-        if time.time() - p.t0 >= limit and limit < TRACK_SECONDS:
+        if time.time() - p.t0 >= limit and (long or limit < TRACK_SECONDS):
             p.meta["age_exit"] = True
+        if long and "long_exit" not in p.meta:
+            p.meta["long_exit"] = ("lost" if p.meta.get("lost_price") else "age", p.last - 1)
         p.finish()
         self.open.remove(p)
         self.record(p)
@@ -742,6 +759,9 @@ class Narrative:
             "age_h": p.meta.get("age_h", ""),
             "age_exit": bool(p.meta.get("age_exit")),
             "px_src": p.meta.get("px_src", ""),
+            "long_net": round(p.meta["long_exit"][1], 4) if "long_exit" in p.meta else "",
+            "long_why": p.meta["long_exit"][0] if "long_exit" in p.meta else "",
+            "held_h": round((time.time() - p.t0) / 3600, 2),
             "lost_price": bool(p.meta.get("lost_price")),
             "venue": p.meta.get("venue"),
             "graduated": bool(p.meta.get("graduated")),
@@ -793,7 +813,7 @@ class Narrative:
             except ValueError:
                 pass
             by[r["kind"]].append(r)
-        for kind in ("farm_relaunch", "farm_first", "leader", "leader_any", "leader_vol", "vol_any",
+        for kind in ("farm_relaunch", "farm_first", "farm_hold", "leader", "leader_any", "leader_vol", "vol_any",
                      "cold", "control",
                      "hot_early", "second_wave", "young_listed"):
             rs = by.get(kind, [])
@@ -806,6 +826,14 @@ class Narrative:
             p2 = sum(float(r["peak_mult"]) >= 2 for r in rs) / len(rs)
             label = f"{kind}*" if kind in ("hot_early", "second_wave", "young_listed") else kind
             lines.append(f"  {label:13} {len(rs):4}  {p2:6.0%}  " + "  ".join(f"{c:>18}" for c in cells))
+        fh = [r for r in self.done if r["kind"] == "farm_hold" and r.get("long_net") not in ("", None)]
+        if fh:
+            vals = [float(r["long_net"]) for r in fh]
+            lines.append(
+                f"  farm_hold held to 15 h / 20% trail: n {len(vals)} mean {statistics.mean(vals):+.1%} "
+                f"median {statistics.median(vals):+.1%} win {sum(v > 0 for v in vals) / len(vals):.0%} "
+                f"exits {dict(Counter(r['long_why'] for r in fh))}"
+            )
         lines.append("  (* retired; history only. Trending-coin rows count only pool-priced trades.)")
         th_rows = defaultdict(list)
         for r in self.done:
