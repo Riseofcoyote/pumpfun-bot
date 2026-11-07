@@ -159,6 +159,11 @@ class FarmLive:
             self.bought = set(st.get("bought", []))
             self.symbols |= set(st.get("symbols", []))
             self.selftest_done = st.get("selftest_done", False)
+        if not (DATA / "trades.csv").exists():
+            # No transaction was ever sent: any "bought" mark or finished selftest is
+            # left over from refused quotes, not from trades.
+            self.bought.clear()
+            self.selftest_done = False
 
     def save(self) -> None:
         st = {"positions": self.positions, "bought": sorted(self.bought),
@@ -182,6 +187,7 @@ class FarmLive:
         doc = http(f"{JUP_SWAP}/quote?inputMint={inp}&outputMint={out}&amount={amount}"
                    f"&slippageBps={slippage}&restrictIntermediateTokens=true")
         if not doc or "outAmount" not in doc:
+            logger.warning(f"[quote] {inp[:6]}->{out[:6]} failed: {str(doc)[:200]}")
             return None
         return doc
 
@@ -251,6 +257,9 @@ class FarmLive:
             logger.warning(f"[dry-run] would buy {size_sol} SOL of {sym} {mint} (quote {q['outAmount']} units)")
             return None
         before = self.chain.token_balance(self.owner, mint) or 0
+        if note != "selftest":
+            self.bought.add(mint)  # one entry per coin once a transaction may reach the chain
+            self.save()
         sig, status = self.swap(q)
         tokens = (self.chain.token_balance(self.owner, mint) or 0) - before
         ok = status == "SUCCESS" or tokens > 0
@@ -318,11 +327,13 @@ class FarmLive:
             return
         r = cands[0]
         pos = self.buy(r, SELFTEST_SOL, note="selftest")
-        if pos:
-            time.sleep(20)
-            self.sell(pos, "selftest")
-        self.selftest_done = True
-        self.bought.discard(r["mint"])  # the test does not use up the coin's one entry
+        if not pos:
+            logger.warning("[selftest] buy did not fill; will retry")
+            return
+        time.sleep(20)
+        if self.sell(pos, "selftest"):
+            self.selftest_done = True
+            logger.warning("[selftest] round trip complete; trading live from here")
         self.save()
 
     def step(self, now: float, last: dict) -> None:
@@ -361,8 +372,6 @@ class FarmLive:
                     shown = "unknown" if bal is None else f"{bal / 1e9:.4f}"
                     logger.warning(f"[buy] skip {r['symbol']}: balance {shown} SOL, need {SIZE_SOL + RESERVE_SOL}")
                     break
-                if ENABLED:
-                    self.bought.add(r["mint"])  # one entry per coin, even if the buy fails
                 pos = self.buy(r, SIZE_SOL)
                 if pos:
                     self.positions[r["mint"]] = pos
