@@ -149,6 +149,7 @@ class FarmLive:
         self.positions: dict[str, dict] = {}
         self.bought: set[str] = set()
         self.selftest_done = False
+        self.rate_limited = False
 
     # ----- state
     def load(self) -> None:
@@ -186,6 +187,7 @@ class FarmLive:
     def quote(self, inp: str, out: str, amount: int, slippage: int) -> dict | None:
         doc = http(f"{JUP_SWAP}/quote?inputMint={inp}&outputMint={out}&amount={amount}"
                    f"&slippageBps={slippage}&restrictIntermediateTokens=true")
+        self.rate_limited = bool(doc and doc.get("_http") == 429)
         if not doc or "outAmount" not in doc:
             logger.warning(f"[quote] {inp[:6]}->{out[:6]} failed: {str(doc)[:200]}")
             return None
@@ -343,7 +345,10 @@ class FarmLive:
         for mint, pos in list(self.positions.items()):
             age = pos["age0_h"] + (now - pos["t0"]) / 3600
             v = self.value_sol(pos)
-            if v is None:
+            if v is None and self.rate_limited:
+                time.sleep(5)  # Jupiter throttling says nothing about the pool; retry
+                v = self.value_sol(pos)
+            if v is None and not self.rate_limited:
                 pos["fails"] += 1
             else:
                 pos["fails"] = 0
