@@ -46,7 +46,7 @@ DATA = Path(os.environ.get("TRENDING_DATA_DIR", "trades/trending"))
 SIZE_SOL = float(os.environ.get("PAPER_SIZE_SOL", "0.2"))
 POP = int(os.environ.get("POPULATION", "48"))
 EVOLVE_H = float(os.environ.get("EVOLVE_HOURS", "3"))
-DISCOVER_S = 45  # GeckoTerminal refreshes about once a minute
+DISCOVER_S = 60  # GeckoTerminal refreshes about once a minute; 8 list calls each
 QUOTE_S = 5  # price checks on open positions
 MAX_OPEN = 3  # positions per strategy
 FEE_SIDE = 0.006  # DEX fee + priority/network fee, per side
@@ -54,6 +54,11 @@ LATENCY_SIDE = 0.004  # price moving between decision and fill, per side
 MIN_TRADES_RANKED = 6
 CANDIDATE_MIN_TRADES = 60
 MIN_PER_FAMILY = 5
+# No family may hold more of the population than this; past it, new slots go to
+# fresh random strategies of the smallest family. Without the cap the elite of a
+# two-token niche (the XTEN/PREDICT grind) bred into two thirds of the population
+# and left it idle once that niche closed.
+MAX_FAMILY_SHARE = 0.4
 # A candidate must spread its trades: riding one or two tokens that happened to
 # trend all day is market beta, not a rule that transfers.
 CANDIDATE_MIN_TOKENS = 15
@@ -1005,6 +1010,11 @@ class Engine:
                 )
             else:
                 child = random_strategy(self.rng)
+            fams = Counter(s["family"] for s in self.strategies)
+            if fams[child["family"]] >= MAX_FAMILY_SHARE * POP:
+                child = random_strategy(
+                    self.rng, min(SEARCH_FAMILIES, key=lambda f: fams[f])
+                )
             for k in ("stats", "born", "gen"):
                 child.pop(k, None)
             self.strategies.append(self._wrap(child))

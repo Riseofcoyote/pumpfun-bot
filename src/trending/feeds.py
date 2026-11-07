@@ -164,16 +164,19 @@ def discover() -> dict[str, dict]:
         "trend5m": f"{GT}/networks/solana/trending_pools?duration=5m&page=1",
         "trend5m_p2": f"{GT}/networks/solana/trending_pools?duration=5m&page=2",
         "trend1h": f"{GT}/networks/solana/trending_pools?duration=1h&page=1",
+        "trend1h_p2": f"{GT}/networks/solana/trending_pools?duration=1h&page=2",
+        "trend6h": f"{GT}/networks/solana/trending_pools?duration=6h&page=1",
         "volume": f"{GT}/networks/solana/pools?sort=h24_volume_usd_desc&page=1",
         "volume_p2": f"{GT}/networks/solana/pools?sort=h24_volume_usd_desc&page=2",
+        "volume_p3": f"{GT}/networks/solana/pools?sort=h24_volume_usd_desc&page=3",
     }
     out: dict[str, dict] = {}
     for name, url in lists.items():
         doc = get_json(url, GT_GATE, GT_HDR)
         if not doc:
             continue
-        offset = 20 if name.endswith("_p2") else 0
-        key = name.removesuffix("_p2")
+        key, _, page = name.partition("_p")
+        offset = 20 * (int(page) - 1) if page else 0
         for i, p in enumerate(doc.get("data") or []):
             rec = _parse_gt_pool(p)
             if not rec:
