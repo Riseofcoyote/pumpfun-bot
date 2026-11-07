@@ -19,6 +19,8 @@ Strategies, each paper-traded and scored under the devwatch exit rules:
 - ``farm_relaunch`` / ``farm_first``: the XTEN/PREDICT farm-cycle pattern
   (see ``farm_rule``), split by whether the ticker appeared on another mint in
   the last 72 h; one position per coin at a time, sold by coin age 15 h.
+- ``young_listed``: pools under 1 h old already on a trending list (at most 2
+  per round), priced from the pool so a vanished pool counts as a total loss.
 - ``cold``: a launch in a theme whose share is falling (one per 5 min); tests
   whether skipping fading themes helps.
 - ``control``: a random launch every 5 minutes.
@@ -249,6 +251,8 @@ def vol_rule(rec: dict) -> bool:
 
 
 MAX_MULT = 50.0
+YOUNG_MAX_AGE_H = 1.0
+YOUNG_PER_ROUND = 2
 SPIKE_CONFIRM = 3
 FARM_SEED_SYMBOLS = {"XTEN", "PREDICT"}
 FARM_SEARCH_EVERY = 600
@@ -369,6 +373,7 @@ class Narrative:
         self.leader_seen: dict[str, float] = {}
         self.vol_seen: dict[str, float] = {}
         self.farm_open: set[str] = set()
+        self.young_seen: dict[str, float] = {}
         self.farm_symbols: set[str] = set(FARM_SEED_SYMBOLS)
         self.sym_mints: dict[str, dict[str, float]] = defaultdict(dict)
         self.last_control = 0.0
@@ -538,6 +543,17 @@ class Narrative:
                         break
                 else:
                     self.stats["leader_no_pick"] += 1
+                # Young listed coins: on the snapshots, pools under 1 h old already on a
+                # trending list looked +90% median an hour later, but snapshots only keep
+                # coins that stay listed. Paper-trade them live, where a vanished pool is
+                # a total loss, to see whether any of that survives.
+                young = [r for r in pools if r["age_h"] <= YOUNG_MAX_AGE_H and r["pc"]["h24"] <= 1.0
+                         and r["pc"]["m5"] <= 0.02 and r.get("quote_is_sol", True)
+                         and now - self.young_seen.get(r["mint"], 0) > LEADER_COOLDOWN]
+                for r in young[:YOUNG_PER_ROUND]:
+                    self.young_seen[r["mint"]] = now
+                    self.fire("young_listed", {"mint": r["mint"], "pool": r["pool"], "symbol": r["symbol"],
+                                               "theme": "", "amm": True, "age_h": round(r["age_h"], 2)})
                 # Farm-cycle pattern: one open position per coin, re-entered after each close.
                 for r in pools:
                     seen = self.sym_mints[r["symbol"].upper()]
@@ -766,12 +782,13 @@ class Narrative:
         lines.append(f"Per strategy, net per trade after costs ({SIZE_SOL} SOL stake): mean / median / win%")
         lines.append("  strategy        n  peak>2x  " + "  ".join(f"{e:>18}" for e in exits))
         by = defaultdict(list)
-        amm_kinds = {"leader", "leader_any", "leader_vol", "vol_any", "farm_relaunch", "farm_first"}
+        amm_kinds = {"leader", "leader_any", "leader_vol", "vol_any", "farm_relaunch", "farm_first",
+                     "young_listed"}
         for r in self.done:
             if r["kind"] in amm_kinds and not r.get("px_src"):
                 continue  # priced from Jupiter before pool pricing; stale prints looked like holds
             by[r["kind"]].append(r)
-        for kind in ("farm_relaunch", "farm_first", "leader", "leader_any", "leader_vol", "vol_any",
+        for kind in ("farm_relaunch", "farm_first", "young_listed", "leader", "leader_any", "leader_vol", "vol_any",
                      "cold", "control",
                      "hot_early", "second_wave"):
             rs = by.get(kind, [])
