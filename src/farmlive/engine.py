@@ -46,6 +46,7 @@ EXIT_AGE_H = 15.0
 TRAIL = 0.20
 LIQ_DROP = 0.35  # liquidity pulled this far below entry is the usual lead-in to a rug
 LIQ_EVERY = 120
+POOL_FEE = 0.0125
 SEARCH_EVERY = 300
 LEARN_EVERY = 900
 WATCH_EVERY = 30
@@ -333,7 +334,32 @@ class FarmLive:
         except (TypeError, KeyError, ValueError):
             return None
 
+    def pool_pair(self, pool: str | None) -> dict | None:
+        if not pool:
+            return None
+        doc = feeds.get_json(f"{feeds.DS}/pairs/solana/{pool}", feeds.DS_GATE)
+        return ((doc or {}).get("pairs") or [None])[0] or (doc or {}).get("pair")
+
     def value_sol(self, pos: dict) -> float | None:
+        """Sell value from the pool's own price (DexScreener) less the pool fee.
+
+        Jupiter is kept for the sell itself: the other testers on this machine use
+        it too, and its 429s left the trail blind for 20 minutes on the first trade.
+        """
+        pair = self.pool_pair(pos.get("pool"))
+        dec = pos.get("decimals")
+        if dec is None:
+            dec = self.decimals(pos["mint"])
+            pos["decimals"] = dec
+        try:
+            px = float(pair["priceNative"])
+            pos["liq"] = float(pair["liquidity"]["usd"])
+            pos.setdefault("liq0", pos["liq"])
+        except (TypeError, KeyError, ValueError):
+            px = None
+        if px and dec is not None:
+            self.rate_limited = False
+            return pos["tokens"] / 10**dec * px * (1 - POOL_FEE)
         q = self.quote(pos["mint"], SOL_MINT, pos["tokens"], SELL_SLIPPAGE_BPS)
         return int(q["outAmount"]) / 1e9 if q else None
 
