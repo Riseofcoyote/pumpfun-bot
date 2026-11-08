@@ -21,6 +21,8 @@ ds = get(f"https://api.dexscreener.com/latest/dex/tokens/{MINT}")
 for p in (ds.get("pairs") or [])[:6]:
     print("DS", p.get("dexId"), p.get("pairAddress"), "quote", p["quoteToken"]["symbol"],
           "liq", (p.get("liquidity") or {}).get("usd"), "px", p.get("priceUsd"), "labels", p.get("labels"))
+    print("   volume", p.get("volume"), "txns", p.get("txns"), "change", p.get("priceChange"),
+          "mcap", p.get("marketCap"), "created", p.get("pairCreatedAt"))
 for lam in (10_000_000, 100_000_000):
     q = get(f"https://lite-api.jup.ag/swap/v1/quote?inputMint={SOL}&outputMint={MINT}&amount={lam}&slippageBps=300")
     print("JUP", lam, "out", q.get("outAmount"), "impact", q.get("priceImpactPct"),
