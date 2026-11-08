@@ -47,7 +47,8 @@ TRAIL = 0.20
 LIQ_DROP = 0.35  # liquidity pulled this far below entry is the usual lead-in to a rug
 LIQ_EVERY = 120
 POOL_FEE = 0.0125
-HELD_EVERY = 180  # seconds between wallet checks for positions sold by hand
+HELD_EVERY = 180
+RELAUNCH_PROOF_H = 7 * 24  # a learned ticker needs 2+ mints within this window  # seconds between wallet checks for positions sold by hand
 SEARCH_EVERY = 300
 LEARN_EVERY = 900
 WATCH_EVERY = 30
@@ -335,7 +336,14 @@ class FarmLive:
     def candidates(self) -> list[dict]:
         out = []
         for sym in sorted(self.symbols):
-            for r in ds_search_pools(sym):
+            pools = ds_search_pools(sym)
+            # A ticker learned from the trending lists is traded only once it has
+            # relaunched: TIKTOK matched farm_rule once at 1.3 h and was pulled an
+            # hour later. XTEN and PREDICT have relaunched daily all week.
+            recent = {r["mint"] for r in pools if r["age_h"] <= RELAUNCH_PROOF_H}
+            if sym not in FARM_SEED_SYMBOLS and len(recent) < 2:
+                continue
+            for r in pools:
                 if farm_rule(r) and r["mint"] not in self.bought:
                     out.append(r)
         return sorted(out, key=lambda r: r["age_h"])
