@@ -106,7 +106,10 @@ RULE_NAMES = [v[0] for v in VARIANTS] + [v[0] for v in DELAYED]
 RESULT_FIELDS = [
     "time_utc", "kind", "symbol", "mint", "creator", "via", "source_mcap",
     "graduated", "peak_mult", "mult_m5", "mult_m15", "mult_m30", "mult_m60",
-] + [f"{n}_{x}" for n in RULE_NAMES for x in ("net", "why")]  # fmt: skip
+] + [f"{n}_{x}" for n in RULE_NAMES for x in ("net", "why")] + ["gap_min"]  # fmt: skip
+# A signal whose creator launched again within this many minutes is a "burst"
+# relaunch; the report splits grad_dev on it.
+BURST_MIN = 10.0
 
 EXCHANGES = {
     "5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9",
@@ -414,6 +417,8 @@ class DevWatch:
         self.hubs: set[str] = set()
         self.transfers_today: Counter = Counter()
         self.creator_signals: Counter = Counter()  # (utc day, creator) -> launches
+        # signal creator -> epoch of their last create
+        self.last_launch: dict[str, float] = {}
         self.day = datetime.now(UTC).date().isoformat()
         self.seen_sigs: set[str] = set()
         self.tx_queue: asyncio.Queue = asyncio.Queue(maxsize=500)
@@ -850,6 +855,16 @@ class DevWatch:
                         }
                         if hit:
                             kind, extra = hit
+                            now = time.time()
+                            prev = self.last_launch.get(creator)
+                            # Minutes since this creator's previous create, capped ones
+                            # included; blank when none was seen since start.
+                            extra["gap_min"] = (
+                                round((now - prev) / 60, 1) if prev else ""
+                            )
+                            if len(self.last_launch) > 50_000:
+                                self.last_launch.clear()
+                            self.last_launch[creator] = now
                             key = (datetime.now(UTC).date().isoformat(), creator)
                             self.creator_signals[key] += 1
                             if self.creator_signals[key] > MAX_SIGNALS_PER_CREATOR_DAY:
@@ -951,6 +966,7 @@ class DevWatch:
             "source_mcap": round(p.meta.get("source_mcap", 0) or 0),
             "graduated": bool(p.meta.get("graduated")),
             "peak_mult": round(p.peak, 3),
+            "gap_min": p.meta.get("gap_min", ""),
         }
         for sec, name in ((300, "m5"), (900, "m15"), (1800, "m30"), (3600, "m60")):
             v = p.at(sec)
@@ -973,6 +989,43 @@ class DevWatch:
         )
 
     # ----- reporting
+    @staticmethod
+    def burst_lines(rows: list[dict]) -> list[str]:
+        """grad_dev split by burst relaunch (creator's previous launch <= BURST_MIN ago).
+
+        Rows written before gap_min existed fall back to the gap between the
+        creator's recorded results, which end up to an hour after the launch.
+        """
+        last: dict[str, datetime] = {}
+        groups: dict[str, list[dict]] = {"burst": [], "other": []}
+        for r in rows:
+            try:
+                t = datetime.fromisoformat(r["time_utc"].replace("Z", "+00:00"))
+            except (KeyError, ValueError):
+                continue
+            gap = r.get("gap_min")
+            if gap in (None, ""):
+                prev = last.get(r.get("creator", ""))
+                gap = (t - prev).total_seconds() / 60 if prev else None
+            last[r.get("creator", "")] = t
+            burst = gap is not None and float(gap) <= BURST_MIN
+            groups["burst" if burst else "other"].append(r)
+        out = [
+            f"\ngrad_dev split (burst = same creator launched again within {BURST_MIN:.0f} min):"
+        ]
+        for name, rs in groups.items():
+            trail = sorted(float(v) for r in rs if (v := r.get("trail_net")))
+            hold = [float(v) for r in rs if (v := r.get("hold60_net"))]
+            if len(trail) < 5:
+                continue
+            ex_top3 = statistics.mean(trail[:-3])
+            out.append(
+                f"  {name:6} n={len(trail):4} devs={len({r.get('creator') for r in rs}):3}"
+                f"  trail mean {statistics.mean(trail):+.1%} median {statistics.median(trail):+.1%}"
+                f" without top 3 {ex_top3:+.1%}  hold60 mean {statistics.mean(hold):+.1%}"
+            )
+        return out
+
     def report(self) -> str:
         w = self.watched()
         lines = [
@@ -1024,6 +1077,7 @@ class DevWatch:
             "  (means; one big winner can carry a column, so read them with peak>2x and devs;"
             " d5/d15 columns are mean/trades entered late, older rows have none)"
         )
+        lines.extend(self.burst_lines(by.get("grad_dev", [])))
         sig = [r for r in self.done if r["kind"] != "control"]
         if sig:
             lines.append("\nRecent signals:")
