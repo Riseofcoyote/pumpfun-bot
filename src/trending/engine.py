@@ -107,6 +107,53 @@ def side_cost(liq_usd: float, size_usd: float) -> float:
     return FEE_SIDE + LATENCY_SIDE + min(impact, 0.25)
 
 
+def ledger_split(path: Path, farm_symbols: set[str], since: float) -> list[str]:
+    """Report lines: closed trades since ``since`` split into relaunch tickers and the rest.
+
+    The farm grind (one ticker relaunched on a new mint each day) carries nearly all
+    of the population's profit; the rest of the market is the question a
+    transferable rule has to answer, so it gets its own line.
+    """
+    groups: dict[str, list[tuple[float, str]]] = {
+        "relaunch tickers": [],
+        "everything else": [],
+    }
+    if not path.exists():
+        return []
+    try:
+        with path.open(newline="") as f:
+            for row in csv.DictReader(f):
+                if row.get("reason") == "retired":
+                    continue
+                try:
+                    t = datetime.strptime(row["time_utc"], "%Y-%m-%dT%H:%M:%SZ")
+                    ret = float(row["net_ret"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if t.replace(tzinfo=UTC).timestamp() < since:
+                    continue
+                sym = (row.get("symbol") or "").upper()
+                key = "relaunch tickers" if sym in farm_symbols else "everything else"
+                groups[key].append((ret, row.get("mint") or ""))
+    except OSError:
+        return []
+    out = []
+    for name, rows in groups.items():
+        if not rows:
+            out.append(f"  {name:17} n=    0")
+            continue
+        rets = [r for r, _ in rows]
+        gw = sum(r for r in rets if r > 0)
+        gl = -sum(r for r in rets if r < 0)
+        pf = gw / gl if gl > 0 else 99.0
+        out.append(
+            f"  {name:17} n={len(rets):5} avg {statistics.mean(rets):+.2%} "
+            f"win {sum(r > 0 for r in rets) / len(rets):.0%} PF {pf:.2f} "
+            f"tokens {len({m for _, m in rows})}"
+        )
+    return out
+
+
 def new_stats() -> dict:
     return {
         "n": 0,
@@ -1085,6 +1132,13 @@ class Engine:
                 f"all live strategies: {len(all_rets)} trades, avg {statistics.mean(all_rets):+.2%}, "
                 f"win {sum(r > 0 for r in all_rets) / len(all_rets):.0%}"
             )
+        farm = {sym for sym, mints in self.symbol_mints.items() if len(mints) > 1}
+        split = ledger_split(DATA / "trades.csv", farm, time.time() - 48 * 3600)
+        if split:
+            lines.append(
+                "\nLedger, last 48 h (relaunch tickers = one ticker on 2+ mints):"
+            )
+            lines += split
         lines.append("\nBy family (live strategies):")
         for fam in FAMILIES:
             rs = [
