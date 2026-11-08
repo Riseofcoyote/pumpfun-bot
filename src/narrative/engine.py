@@ -23,6 +23,9 @@ Strategies, each paper-traded and scored under the devwatch exit rules:
   per round), priced from the pool so a vanished pool counts as a total loss.
 - ``farm_hold``: one entry per farm coin held until it is 15 h old, or sold
   after a 20% fall from its peak (column long_net).
+- ``dip_revert``: on up to 15 swingy established coins (3-30 days old, $150k+
+  liquidity, 24 h range >= 50%, 24 h move <= 40%), buy a 5-minute close 5%
+  under its 2 h average; sell at the average (at least +5%), -10%, or 2 h.
 - ``cold``: a launch in a theme whose share is falling (one per 5 min); tests
   whether skipping fading themes helps.
 - ``control``: a random launch every 5 minutes.
@@ -253,7 +256,17 @@ def vol_rule(rec: dict) -> bool:
 
 
 MAX_MULT = 50.0
-LONG_TRAIL = 0.20  # farm_hold sells after a 20% fall from its peak
+LONG_TRAIL = 0.20
+DIP_EVERY = 300
+DIP_UNIVERSE_EVERY = 1800
+DIP_MAX_COINS = 15
+DIP_MIN_DAY_RANGE = 0.50  # swingy: at least a 50% high-low range over the last 24 h
+DIP_AVG_BARS = 24  # 2 h of 5-minute closes
+DIP_DEPTH = 0.05
+DIP_STOP = 0.10
+DIP_HOLD_S = 7200
+DIP_COOLDOWN = 1800
+DIP_COST_SIDE = 0.006  # established pools; the live PREDICT round trip cost ~0.5% in total  # farm_hold sells after a 20% fall from its peak
 YOUNG_MAX_AGE_H = 1.0
 YOUNG_PER_ROUND = 2
 SPIKE_CONFIRM = 3
@@ -321,6 +334,15 @@ def load_results(path: Path) -> list[dict]:
     return [{k: r.get(k, "") for k in RESULT_FIELDS} for r in rows]
 
 
+def gt_ohlcv(pool: str, tf: str, agg: int, limit: int) -> list[tuple]:
+    """GeckoTerminal candles oldest first as (t, open, high, low, close); [] on failure."""
+    doc = feeds.get_json(
+        f"{feeds.GT}/networks/solana/pools/{pool}/ohlcv/{tf}?aggregate={agg}&limit={limit}&currency=usd",
+        feeds.GT_GATE)
+    rows = (((doc or {}).get("data") or {}).get("attributes") or {}).get("ohlcv_list") or []
+    return sorted((float(t), float(o), float(h), float(lo), float(c)) for t, o, h, lo, c, _v in rows if c)
+
+
 def ds_search_pools(symbol: str) -> list[dict]:
     """Solana SOL-quoted pools whose base ticker is ``symbol``, shaped like feeds.discover().
 
@@ -377,6 +399,8 @@ class Narrative:
         self.vol_seen: dict[str, float] = {}
         self.farm_open: set[str] = set()
         self.farm_hold_seen: set[str] = set()
+        self.dip_open: set[str] = set()
+        self.dip_last: dict[str, float] = {}
         self.young_seen: dict[str, float] = {}
         self.farm_symbols: set[str] = set(FARM_SEED_SYMBOLS)
         self.sym_mints: dict[str, dict[str, float]] = defaultdict(dict)
@@ -583,6 +607,66 @@ class Narrative:
                 logger.exception("[leader] failed")
             await asyncio.sleep(LEADER_EVERY)
 
+    async def dip_loop(self) -> None:
+        """Paper-buy 5% dips below the 2 h average on swingy, non-trending established coins."""
+        await asyncio.sleep(180)
+        universe: list[dict] = []
+        built = 0.0
+        while True:
+            try:
+                now = time.time()
+                if now - built >= DIP_UNIVERSE_EVERY or not universe:
+                    universe = await asyncio.to_thread(self.dip_universe)
+                    built = now
+                    logger.info(f"[dip] universe {[r['symbol'] for r in universe]}")
+                for r in universe:
+                    if r["mint"] in self.dip_open or now - self.dip_last.get(r["mint"], 0) < DIP_COOLDOWN:
+                        continue
+                    bars = await asyncio.to_thread(gt_ohlcv, r["pool"], "minute", 5, DIP_AVG_BARS + 1)
+                    if len(bars) < DIP_AVG_BARS + 1:
+                        continue
+                    avg = sum(b[4] for b in bars[-DIP_AVG_BARS - 1:-1]) / DIP_AVG_BARS
+                    last = bars[-1][4]
+                    if last <= avg * (1 - DIP_DEPTH):
+                        self.dip_open.add(r["mint"])
+                        self.dip_last[r["mint"]] = now
+                        self.fire("dip_revert", {
+                            "mint": r["mint"], "pool": r["pool"], "symbol": r["symbol"], "amm": True,
+                            "theme": "", "age_h": round(r["age_h"], 1), "long": True,
+                            "exit_after_s": DIP_HOLD_S, "cost_side": DIP_COST_SIDE,
+                            "dip": {"tp": max(avg / last, 1 + DIP_DEPTH), "sl": 1 - DIP_STOP},
+                        })
+            except Exception:  # noqa: BLE001
+                logger.exception("[dip] round failed")
+            await asyncio.sleep(DIP_EVERY)
+
+    def dip_universe(self) -> list[dict]:
+        pools = dict(feeds.discover())
+        for page in (1, 2):
+            doc = feeds.get_json(f"{feeds.GT}/networks/solana/pools?page={page}&sort=h24_volume_usd_desc",
+                                 feeds.GT_GATE)
+            for p in (doc or {}).get("data") or []:
+                rec = feeds._parse_gt_pool(p)
+                if rec:
+                    pools.setdefault(rec["pool"], rec)
+        out, seen = [], set()
+        for r in sorted(pools.values(), key=lambda r: -r["vol"]["h24"]):
+            if r["mint"] in seen or not r.get("quote_is_sol", True):
+                continue
+            if not (72 <= r["age_h"] <= 720 and r["liq"] >= 150_000 and abs(r["pc"]["h24"]) <= 0.40):
+                continue
+            h1 = gt_ohlcv(r["pool"], "hour", 1, 24)
+            if len(h1) < 20:
+                continue
+            day_range = max(b[2] for b in h1) / min(b[3] for b in h1) - 1
+            if day_range < DIP_MIN_DAY_RANGE:
+                continue
+            seen.add(r["mint"])
+            out.append(r)
+            if len(out) >= DIP_MAX_COINS:
+                break
+        return out
+
     def farm_enter(self, r: dict, now: float) -> None:
         seen = self.sym_mints[r["symbol"].upper()]
         seen.setdefault(r["mint"], now)
@@ -623,6 +707,8 @@ class Narrative:
             await self._track(kind, meta)
         finally:
             self.farm_open.discard(meta.get("mint") or "")
+            if kind == "dip_revert":
+                self.dip_open.discard(meta.get("mint") or "")
 
     def pool_price(self, pool: str, mint: str) -> float | None:
         q = feeds.quotes({pool: mint}).get(pool)
@@ -644,7 +730,7 @@ class Narrative:
             if not entry_px:
                 self.stats["unpriced"] += 1
                 return
-            first = (1 - GRAD_SIDE - LATENCY) ** 2
+            first = (1 - meta.get("cost_side", GRAD_SIDE + LATENCY)) ** 2
             meta["venue"] = "amm"
         elif meta.get("amm") or not curve_addr:
             meta["px_src"] = "jup"
@@ -687,6 +773,7 @@ class Narrative:
             el = time.time() - p.t0
             await asyncio.sleep(4 if el < 600 else 15)
             mult = None
+            ratio = 1.0
             if entry_px is None:
                 data = await self.rpc.account(curve_addr)
                 cur = decode_curve(data) if data else None
@@ -705,8 +792,9 @@ class Narrative:
                 else:
                     px = (await asyncio.to_thread(feeds.jup_prices, [mint])).get(mint)
                 if px:
-                    base = p.meta.get("grad_base", (1 - GRAD_SIDE - LATENCY) ** 2)
+                    base = p.meta.get("grad_base", (1 - meta.get("cost_side", GRAD_SIDE + LATENCY)) ** 2)
                     mult = base * px / entry_px
+                    ratio = px / entry_px
                     if mult > MAX_MULT:
                         self.stats["price_over_cap"] += 1
                         mult = None  # not a fill a 0.2 SOL position could get in an hour
@@ -739,6 +827,14 @@ class Narrative:
                 continue
             fails = 0
             p.mark(mult)
+            dip = meta.get("dip")
+            if dip and pool:
+                if ratio >= dip["tp"]:
+                    p.meta["long_exit"] = ("target", p.last - 1)
+                    break
+                if ratio <= dip["sl"]:
+                    p.meta["long_exit"] = ("stop", p.last - 1)
+                    break
         if time.time() - p.t0 >= limit and (long or limit < TRACK_SECONDS):
             p.meta["age_exit"] = True
         if long and "long_exit" not in p.meta:
@@ -826,6 +922,16 @@ class Narrative:
             p2 = sum(float(r["peak_mult"]) >= 2 for r in rs) / len(rs)
             label = f"{kind}*" if kind in ("hot_early", "second_wave", "young_listed") else kind
             lines.append(f"  {label:13} {len(rs):4}  {p2:6.0%}  " + "  ".join(f"{c:>18}" for c in cells))
+        dr = [r for r in self.done if r["kind"] == "dip_revert" and r.get("long_net") not in ("", None)]
+        if dr:
+            vals = [float(r["long_net"]) for r in dr]
+            hrs = (time.time() - min(time.mktime(time.strptime(r["time_utc"][:19], "%Y-%m-%dT%H:%M:%S")) for r in dr)) / 3600
+            lines.append(
+                f"  dip_revert (5% under 2 h avg; target avg/+5%, stop -10%, 2 h max): n {len(vals)} "
+                f"mean {statistics.mean(vals):+.1%} median {statistics.median(vals):+.1%} "
+                f"win {sum(v > 0 for v in vals) / len(vals):.0%} exits {dict(Counter(r['long_why'] for r in dr))} "
+                f"~{len(vals) / max(hrs, 1):.1f}/h coins {len({r['mint'] for r in dr})}"
+            )
         fh = [r for r in self.done if r["kind"] == "farm_hold" and r.get("long_net") not in ("", None)]
         if fh:
             vals = [float(r["long_net"]) for r in fh]
@@ -884,7 +990,8 @@ async def amain() -> None:
                 logger.exception("save failed")
 
     await asyncio.gather(
-        heater(), saver(), nv.leader_loop(), nv.pumpportal_loop(websockets), nv.farm_search_loop()
+        heater(), saver(), nv.leader_loop(), nv.pumpportal_loop(websockets), nv.farm_search_loop(),
+        nv.dip_loop()
     )
 
 
