@@ -47,6 +47,7 @@ TRAIL = 0.20
 LIQ_DROP = 0.35  # liquidity pulled this far below entry is the usual lead-in to a rug
 LIQ_EVERY = 120
 POOL_FEE = 0.0125
+HELD_EVERY = 180  # seconds between wallet checks for positions sold by hand
 SEARCH_EVERY = 300
 LEARN_EVERY = 900
 WATCH_EVERY = 30
@@ -385,6 +386,19 @@ class FarmLive:
             self.selftest()
             return
         for mint, pos in list(self.positions.items()):
+            if now - pos.get("held_at", 0) >= HELD_EVERY:
+                pos["held_at"] = now
+                held = self.chain.token_balance(self.owner, mint)
+                if held == 0:
+                    # Sold outside the bot (e.g. by hand in a wallet app): close it here.
+                    logger.warning(f"[close] {pos['symbol']} no longer in the wallet; closing position")
+                    self.log_trade({"action": "closed", "symbol": pos["symbol"], "mint": mint,
+                                    "note": "sold outside the bot"})
+                    self.positions.pop(mint)
+                    self.save()
+                    continue
+                if held is not None and held != pos["tokens"]:
+                    pos["tokens"] = held
             age = pos["age0_h"] + (now - pos["t0"]) / 3600
             v = self.value_sol(pos)
             if v is None and self.rate_limited:
