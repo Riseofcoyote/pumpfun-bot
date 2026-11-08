@@ -1,0 +1,21 @@
+# Runs an offline research script from tools/ against live public market data.
+# Read-only: no secrets, no wallet, no Fly access.
+name: Research
+on:
+  workflow_dispatch:
+    inputs:
+      script:
+        description: Script in tools/ to run
+        default: range_research.py
+permissions:
+  contents: read
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python "tools/${{ inputs.script }}"
