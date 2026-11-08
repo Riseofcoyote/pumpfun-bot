@@ -221,8 +221,7 @@ def main() -> None:
         pos = sum(1 for n, m in per_coin.values() if m > 0)
         print(f"{fam}: params {p}")
         print(f"   train {summarize(tr)}")
-        print(f"   TEST  {summarize(te)}  -> {len(te) / max(hours, 1):.1f} trades/hour per coin-equivalent, "
-              f"{tph * len(data):.1f}/hour across all {len(data)} coins; "
+        print(f"   TEST  {summarize(te)}  -> {tph:.1f} trades/hour across all {len(data)} coins; "
               f"{pos}/{len(per_coin)} coins positive")
         for sym, (n, m) in sorted(per_coin.items(), key=lambda x: -x[1][0])[:8]:
             print(f"      {sym[:12]:12} n {n:3} mean {m:+.2%}")
