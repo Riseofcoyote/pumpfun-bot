@@ -44,6 +44,8 @@ SELFTEST_SOL = float(os.environ.get("FARMLIVE_SELFTEST_SOL", "0") or 0)
 RESERVE_SOL = 0.02  # never spend the wallet below this (fees, token-account rent)
 EXIT_AGE_H = 15.0
 TRAIL = 0.20
+LIQ_DROP = 0.35  # liquidity pulled this far below entry is the usual lead-in to a rug
+LIQ_EVERY = 120
 SEARCH_EVERY = 300
 LEARN_EVERY = 900
 WATCH_EVERY = 30
@@ -160,6 +162,10 @@ class FarmLive:
             self.bought = set(st.get("bought", []))
             self.symbols |= set(st.get("symbols", []))
             self.selftest_done = st.get("selftest_done", False)
+        # Opened before liq0 was recorded; $187,156 was the pool's liquidity at that buy.
+        old = self.positions.get("1VJyBvUb83sDBjRvnVH2chd1bVzFCmrrJyFidbCM7KR")
+        if old and not old.get("liq0"):
+            old["liq0"] = 187_156.0
         if not (DATA / "trades.csv").exists():
             # No transaction was ever sent: any "bought" mark or finished selftest is
             # left over from refused quotes, not from trades.
@@ -271,7 +277,7 @@ class FarmLive:
         if not ok or tokens <= 0:
             return None
         return {"mint": mint, "symbol": sym, "pool": r.get("pool"), "tokens": tokens,
-                "cost_sol": size_sol, "t0": time.time(), "age0_h": r["age_h"],
+                "cost_sol": size_sol, "t0": time.time(), "age0_h": r["age_h"], "liq0": r.get("liq"),
                 "peak_sol": size_sol, "last_sol": size_sol, "fails": 0}
 
     def sell(self, pos: dict, why: str) -> bool:
@@ -317,6 +323,16 @@ class FarmLive:
                 self.symbols.add(r["symbol"].upper())
                 logger.warning(f"[learn] new farm ticker {r['symbol']}")
 
+    def pool_liq(self, pool: str | None) -> float | None:
+        if not pool:
+            return None
+        doc = feeds.get_json(f"{feeds.DS}/pairs/solana/{pool}", feeds.DS_GATE)
+        pair = ((doc or {}).get("pairs") or [None])[0] or (doc or {}).get("pair")
+        try:
+            return float(pair["liquidity"]["usd"])
+        except (TypeError, KeyError, ValueError):
+            return None
+
     def value_sol(self, pos: dict) -> float | None:
         q = self.quote(pos["mint"], SOL_MINT, pos["tokens"], SELL_SLIPPAGE_BPS)
         return int(q["outAmount"]) / 1e9 if q else None
@@ -354,8 +370,17 @@ class FarmLive:
                 pos["fails"] = 0
                 pos["last_sol"] = v
                 pos["peak_sol"] = max(pos["peak_sol"], v)
+            if now - pos.get("liq_at", 0) >= LIQ_EVERY:
+                liq = self.pool_liq(pos.get("pool"))
+                pos["liq_at"] = now
+                if liq:
+                    pos.setdefault("liq0", liq)
+                    pos["liq0"] = pos["liq0"] or liq
+                    pos["liq"] = liq
             why = None
-            if age >= EXIT_AGE_H:
+            if pos.get("liq") and pos.get("liq0") and pos["liq"] <= pos["liq0"] * (1 - LIQ_DROP):
+                why = f"liquidity {pos['liq']:,.0f} vs {pos['liq0']:,.0f} at entry"
+            elif age >= EXIT_AGE_H:
                 why = f"age {age:.1f}h"
             elif v is not None and v <= pos["peak_sol"] * (1 - TRAIL):
                 why = f"trail: {v:.4f} vs peak {pos['peak_sol']:.4f} SOL"
