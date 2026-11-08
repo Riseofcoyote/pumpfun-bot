@@ -71,6 +71,17 @@ def load_keypair() -> Keypair:
         raise SystemExit("SOLANA_PRIVATE_KEY is not a valid base58 private key") from None
 
 
+def jup(url: str, body: dict | None = None, timeout: float = 20) -> dict | None:
+    """Jupiter call with up to 4 tries on 429 (the testers on this machine share its limit)."""
+    doc = None
+    for wait in (0, 2, 5, 10):
+        time.sleep(wait)
+        doc = http(url, body, timeout)
+        if not (doc and doc.get("_http") == 429):
+            return doc
+    return doc
+
+
 def http(url: str, body: dict | None = None, timeout: float = 20) -> dict | None:
     data = json.dumps(body).encode() if body is not None else None
     headers = {"Accept": "application/json", "User-Agent": "pumpfun-bot-farmlive/1.0"}
@@ -168,6 +179,17 @@ class FarmLive:
         old = self.positions.get("1VJyBvUb83sDBjRvnVH2chd1bVzFCmrrJyFidbCM7KR")
         if old and not old.get("liq0"):
             old["liq0"] = 187_156.0
+        tp = DATA / "trades.csv"
+        if tp.exists():
+            sent = set()
+            with tp.open() as f:
+                for row in csv.DictReader(f):
+                    if row.get("action") == "buy" and row.get("sig"):
+                        sent.add(row["mint"])
+            unsent = {m for m in self.bought if m not in sent}
+            if unsent:
+                logger.warning(f"[load] {len(unsent)} coin(s) marked bought with no transaction sent; unmarking")
+                self.bought -= unsent
         if not (DATA / "trades.csv").exists():
             # No transaction was ever sent: any "bought" mark or finished selftest is
             # left over from refused quotes, not from trades.
@@ -193,7 +215,7 @@ class FarmLive:
 
     # ----- swaps
     def quote(self, inp: str, out: str, amount: int, slippage: int) -> dict | None:
-        doc = http(f"{JUP_SWAP}/quote?inputMint={inp}&outputMint={out}&amount={amount}"
+        doc = jup(f"{JUP_SWAP}/quote?inputMint={inp}&outputMint={out}&amount={amount}"
                    f"&slippageBps={slippage}&restrictIntermediateTokens=true")
         self.rate_limited = bool(doc and doc.get("_http") == 429)
         if not doc or "outAmount" not in doc:
@@ -203,7 +225,7 @@ class FarmLive:
 
     def swap(self, q: dict) -> tuple[str | None, str]:
         """Sign and send Jupiter's transaction for quote q; (signature, status)."""
-        doc = http(f"{JUP_SWAP}/swap", {
+        doc = jup(f"{JUP_SWAP}/swap", {
             "quoteResponse": q, "userPublicKey": self.owner, "wrapAndUnwrapSol": True,
             "dynamicComputeUnitLimit": True,
             "prioritizationFeeLamports": {"priorityLevelWithMaxLamports": {
@@ -267,10 +289,10 @@ class FarmLive:
             logger.warning(f"[dry-run] would buy {size_sol} SOL of {sym} {mint} (quote {q['outAmount']} units)")
             return None
         before = self.chain.token_balance(self.owner, mint) or 0
-        if note != "selftest":
-            self.bought.add(mint)  # one entry per coin once a transaction may reach the chain
-            self.save()
         sig, status = self.swap(q)
+        if note != "selftest" and sig:
+            self.bought.add(mint)  # one entry per coin once a transaction reached the RPC
+            self.save()
         tokens = (self.chain.token_balance(self.owner, mint) or 0) - before
         ok = status == "SUCCESS" or tokens > 0
         self.log_trade({"action": "buy", "symbol": sym, "mint": mint, "sol": size_sol, "tokens": tokens,
