@@ -111,7 +111,7 @@ RULE_NAMES = [v[0] for v in VARIANTS] + [v[0] for v in DELAYED]
 RESULT_FIELDS = [
     "time_utc", "kind", "symbol", "mint", "creator", "via", "source_mcap",
     "graduated", "peak_mult", "mult_m5", "mult_m15", "mult_m30", "mult_m60",
-] + [f"{n}_{x}" for n in RULE_NAMES for x in ("net", "why")] + ["gap_min"]  # fmt: skip
+] + [f"{n}_{x}" for n in RULE_NAMES for x in ("net", "why")] + ["gap_min", "end"]  # fmt: skip
 # A signal whose creator launched again within this many minutes is a "burst"
 # relaunch; the report splits grad_dev on it.
 BURST_MIN = 10.0
@@ -942,6 +942,7 @@ class DevWatch:
                 if not out:
                     fails += 1
                     if fails > 40:
+                        path.meta["end"] = "unpriced"
                         break
                     continue
                 val = out * (1 - LATENCY)
@@ -953,6 +954,7 @@ class DevWatch:
             else:
                 fails += 1
                 if fails > 40:
+                    path.meta["end"] = "lost"
                     break
                 continue
             fails = 0
@@ -974,6 +976,9 @@ class DevWatch:
             "graduated": bool(p.meta.get("graduated")),
             "peak_mult": round(p.peak, 3),
             "gap_min": p.meta.get("gap_min", ""),
+            # "unpriced": the curve completed and no sell quote came for 40 reads,
+            # so the exits froze at the last curve value; "lost": curve unreadable.
+            "end": p.meta.get("end", "ok"),
         }
         for sec, name in ((300, "m5"), (900, "m15"), (1800, "m30"), (3600, "m60")):
             v = p.at(sec)
@@ -996,6 +1001,48 @@ class DevWatch:
         )
 
     # ----- reporting
+    @staticmethod
+    def suspect(r: dict) -> bool:
+        """A row whose value froze on a print we could not have sold at.
+
+        Either tracking ended without a price (``end`` unpriced/lost), or, for rows
+        from before ``end`` existed, an ungraduated path stuck at one multiple above
+        2x from minute 5 to 60: the curve completed, no quote came, and the last
+        curve read stood in for the whole hour.
+        """
+        if r.get("end") in ("unpriced", "lost"):
+            return True
+        if r.get("end"):
+            return False
+        try:
+            m5, m60 = float(r["mult_m5"]), float(r["mult_m60"])
+        except (KeyError, TypeError, ValueError):
+            return False
+        return r.get("graduated") not in ("True", True) and m5 > 2 and m5 == m60
+
+    @classmethod
+    def robust_lines(cls, by: dict[str, list[dict]]) -> list[str]:
+        """Per type and rule: median and mean without the 3 best rows, suspect rows out."""
+        rules = [n for n in ("trail", "hold60", "d5_trail", "d15_trail", "d5_tp100")
+                 if n in RULE_NAMES]  # fmt: skip
+        out = [
+            "\nRobust view (suspect frozen prints dropped; median | mean without top 3 | n):",
+            "  type              drop  " + "  ".join(f"{n:>20}" for n in rules),
+        ]
+        for kind, rs in by.items():
+            ok = [r for r in rs if not cls.suspect(r)]
+            cells = []
+            for name in rules:
+                vals = sorted(float(v) for r in ok if (v := r.get(f"{name}_net")))
+                if len(vals) < 5:
+                    cells.append(f"{'-':>20}")
+                    continue
+                cut = statistics.mean(vals[:-3])
+                cell = f"{statistics.median(vals):+.1%} | {cut:+.1%} | {len(vals)}"
+                cells.append(f"{cell:>20}")
+            out.append(f"  {kind:17} {len(rs) - len(ok):4}  " + "  ".join(cells))
+        return out
+
     @staticmethod
     def burst_lines(rows: list[dict]) -> list[str]:
         """grad_dev split by burst relaunch (creator's previous launch <= BURST_MIN ago).
@@ -1084,6 +1131,7 @@ class DevWatch:
             "  (means; one big winner can carry a column, so read them with peak>2x and devs;"
             " d5/d15 columns are mean/trades entered late, older rows have none)"
         )
+        lines.extend(self.robust_lines(by))
         lines.extend(self.burst_lines(by.get("grad_dev", [])))
         sig = [r for r in self.done if r["kind"] != "control"]
         if sig:
