@@ -53,6 +53,10 @@ DEFAULT_KEY = "11111111111111111111111111111111"
 CURVE_FEE = 0.0125  # pump.fun protocol + creator fee per side
 LATENCY = 0.01  # price moving against us between signal and fill, per side
 GRAD_SIDE = 0.01  # per-side cost once trading on PumpSwap
+# A graduated read above GRAD_SPIKE x the last value counts only after this many
+# consecutive reads.
+GRAD_SPIKE = 3.0
+GRAD_SPIKE_READS = 3
 ENTRY_DELAY = 2.0  # seconds from create to our simulated buy
 TRACK_SECONDS = int(
     os.environ.get("DEVWATCH_TRACK_SECONDS", "3600")
@@ -98,6 +102,7 @@ DELAYED = [
     ("d5_trail", 300, 0.6, None, 0.35, 0.30, 0.20, 3600),
     ("d5_hold", 300, 0.6, None, None, None, None, 3600),
     ("d15_trail", 900, 0.6, None, 0.35, 0.30, 0.20, 3600),
+    ("d5_tp100", 300, 0.6, 1.00, 0.35, None, None, 3600),
 ]
 # A late entry pays its own buy and sell fee and latency on the value ratio.
 LATE_COST = ((1 - CURVE_FEE) * (1 - LATENCY)) ** 2
@@ -917,7 +922,7 @@ class DevWatch:
         fails = 0
         last_val = curve_sell_lamports(cur["vt"], cur["vq"], tokens)
         path.mark(last_val / stake)
-        token_raw_per_ui = 1e6
+        spikes = 0
         while time.time() - path.t0 < TRACK_SECONDS and len(path.exits) < len(
             RULE_NAMES
         ):
@@ -928,21 +933,23 @@ class DevWatch:
             if cur and not cur["complete"] and cur["vt"] > 0:
                 val = curve_sell_lamports(cur["vt"], cur["vq"], tokens)
             elif cur and cur["complete"]:
-                px = (await asyncio.to_thread(feeds.jup_prices, [mint])).get(mint)
-                if not px:
+                # Value the bag at what a sell would fetch: Jupiter's mid price on a
+                # freshly migrated coin printed 30-160x spikes that went to ~0 a
+                # read later, and ignored the impact of selling into a new pool.
+                out = await asyncio.to_thread(
+                    feeds.jup_sell_lamports, mint, int(tokens)
+                )
+                if not out:
                     fails += 1
                     if fails > 40:
                         break
                     continue
-                val = (
-                    tokens
-                    / token_raw_per_ui
-                    * px
-                    / self.sol_usd
-                    * 1e9
-                    * (1 - GRAD_SIDE)
-                )
+                val = out * (1 - LATENCY)
                 path.meta["graduated"] = True
+                if val > GRAD_SPIKE * last_val and spikes < GRAD_SPIKE_READS - 1:
+                    spikes += 1  # a real move persists; a one-read print does not
+                    continue
+                spikes = 0
             else:
                 fails += 1
                 if fails > 40:

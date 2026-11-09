@@ -50,6 +50,9 @@ jobs:
                   sigs = await rpc.call("getSignaturesForAddress", [c, {"limit": 1000}]) if c else None
                   f = await dw.trace_funder(c) if c else None
                   print(r["symbol"], r["mint"][-6:], "acct", len(data) if data else None, "creator", c, "sigs", len(sigs) if isinstance(sigs, list) else sigs, "funder", f)
+                  q = feeds.jup_sell_lamports(r["mint"], 10**12)
+                  px = feeds.jup_prices([r["mint"]]).get(r["mint"])
+                  print("  sell 1M tokens: quote", q and q / 1e9, "SOL; mid", px and round(1e6 * px / feeds.sol_usd(), 4), "SOL")
           asyncio.run(t())
           print("ata check", E.find_pda([E.b58decode("Et8w4DyfUkqMebyMj5iv7ugTKfDKjzTDJ2RPDVu8zsRp"),E.b58decode("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"),E.b58decode("So11111111111111111111111111111111111111112")],"ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"))
           PY
