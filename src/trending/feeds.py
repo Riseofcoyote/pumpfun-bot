@@ -214,6 +214,26 @@ def jup_prices(mints: list[str]) -> dict[str, float]:
     return out
 
 
+JUP_QUOTE = "https://lite-api.jup.ag/swap/v1/quote"
+
+
+def jup_sell_lamports(mint: str, raw_amount: int) -> int | None:
+    """Lamports Jupiter's router would pay for ``raw_amount`` base units of ``mint``.
+
+    An executable quote, so pool fees and price impact are included; ``None`` when
+    there is no route or the call fails.
+    """
+    if raw_amount <= 0:
+        return None
+    url = (
+        f"{JUP_QUOTE}?inputMint={mint}&outputMint={SOL_MINT}&amount={raw_amount}"
+        "&slippageBps=500&restrictIntermediateTokens=true"
+    )
+    doc = get_json(url, JUP_GATE)
+    out = int(_f((doc or {}).get("outAmount")))
+    return out if out > 0 else None
+
+
 def quotes(pairs: dict[str, str]) -> dict[str, dict]:
     """Latest price, liquidity and 5-minute flow per pool.
 
