@@ -23,9 +23,10 @@ Strategies, each paper-traded and scored under the devwatch exit rules:
   per round), priced from the pool so a vanished pool counts as a total loss.
 - ``farm_hold``: one entry per farm coin held until it is 15 h old, or sold
   after a 20% fall from its peak (column long_net).
-- ``dip_revert``: on up to 15 swingy established coins (3-30 days old, $150k+
-  liquidity, 24 h range >= 50%, 24 h move <= 40%), buy a 5-minute close 5%
+- ``dip_revert``: on up to 20 swingy established coins, buy a 5-minute close 5%
   under its 2 h average; sell at the average (at least +5%), -10%, or 2 h.
+  Tier "strict": 3-30 days old, $150k+ liquidity, 24 h range >= 50%, 24 h move
+  <= 40%; tier "wide": 2-60 days, $100k+, range >= 30%, move <= 50%.
 - ``cold``: a launch in a theme whose share is falling (one per 5 min); tests
   whether skipping fading themes helps.
 - ``control``: a random launch every 5 minutes.
@@ -259,7 +260,7 @@ MAX_MULT = 50.0
 LONG_TRAIL = 0.20
 DIP_EVERY = 300
 DIP_UNIVERSE_EVERY = 1800
-DIP_MAX_COINS = 15
+DIP_MAX_COINS = 20
 DIP_MIN_DAY_RANGE = 0.50  # swingy: at least a 50% high-low range over the last 24 h
 DIP_AVG_BARS = 24  # 2 h of 5-minute closes
 DIP_DEPTH = 0.05
@@ -618,7 +619,7 @@ class Narrative:
                 if now - built >= DIP_UNIVERSE_EVERY or not universe:
                     universe = await asyncio.to_thread(self.dip_universe)
                     built = now
-                    logger.info(f"[dip] universe {[r['symbol'] for r in universe]}")
+                    logger.warning(f"[dip] universe {[(r['symbol'], r['tier']) for r in universe]}")
                 for r in universe:
                     if r["mint"] in self.dip_open or now - self.dip_last.get(r["mint"], 0) < DIP_COOLDOWN:
                         continue
@@ -632,7 +633,7 @@ class Narrative:
                         self.dip_last[r["mint"]] = now
                         self.fire("dip_revert", {
                             "mint": r["mint"], "pool": r["pool"], "symbol": r["symbol"], "amm": True,
-                            "theme": "", "age_h": round(r["age_h"], 1), "long": True,
+                            "theme": r["tier"], "age_h": round(r["age_h"], 1), "long": True,
                             "exit_after_s": DIP_HOLD_S, "cost_side": DIP_COST_SIDE,
                             "dip": {"tp": max(avg / last, 1 + DIP_DEPTH), "sl": 1 - DIP_STOP},
                         })
@@ -642,7 +643,7 @@ class Narrative:
 
     def dip_universe(self) -> list[dict]:
         pools = dict(feeds.discover())
-        for page in (1, 2):
+        for page in (1, 2, 3, 4):
             doc = feeds.get_json(f"{feeds.GT}/networks/solana/pools?page={page}&sort=h24_volume_usd_desc",
                                  feeds.GT_GATE)
             for p in (doc or {}).get("data") or []:
@@ -653,16 +654,19 @@ class Narrative:
         for r in sorted(pools.values(), key=lambda r: -r["vol"]["h24"]):
             if r["mint"] in seen or not r.get("quote_is_sol", True):
                 continue
-            if not (72 <= r["age_h"] <= 720 and r["liq"] >= 150_000 and abs(r["pc"]["h24"]) <= 0.40):
+            # Wide tier: 2-60 days, $100k+, 24 h range >= 30%, net move <= 50%.
+            if not (48 <= r["age_h"] <= 1440 and r["liq"] >= 100_000 and abs(r["pc"]["h24"]) <= 0.50):
                 continue
             h1 = gt_ohlcv(r["pool"], "hour", 1, 24)
             if len(h1) < 20:
                 continue
             day_range = max(b[2] for b in h1) / min(b[3] for b in h1) - 1
-            if day_range < DIP_MIN_DAY_RANGE:
+            if day_range < 0.30:
                 continue
+            strict = (72 <= r["age_h"] <= 720 and r["liq"] >= 150_000 and abs(r["pc"]["h24"]) <= 0.40
+                      and day_range >= DIP_MIN_DAY_RANGE)
             seen.add(r["mint"])
-            out.append(r)
+            out.append(r | {"tier": "strict" if strict else "wide"})
             if len(out) >= DIP_MAX_COINS:
                 break
         return out
@@ -922,12 +926,15 @@ class Narrative:
             p2 = sum(float(r["peak_mult"]) >= 2 for r in rs) / len(rs)
             label = f"{kind}*" if kind in ("hot_early", "second_wave", "young_listed") else kind
             lines.append(f"  {label:13} {len(rs):4}  {p2:6.0%}  " + "  ".join(f"{c:>18}" for c in cells))
-        dr = [r for r in self.done if r["kind"] == "dip_revert" and r.get("long_net") not in ("", None)]
-        if dr:
+        dr_all = [r for r in self.done if r["kind"] == "dip_revert" and r.get("long_net") not in ("", None)]
+        for tier in ("strict", "wide"):
+            dr = [r for r in dr_all if (r.get("theme") or "strict") == tier]
+            if not dr:
+                continue
             vals = [float(r["long_net"]) for r in dr]
             hrs = (time.time() - min(time.mktime(time.strptime(r["time_utc"][:19], "%Y-%m-%dT%H:%M:%S")) for r in dr)) / 3600
             lines.append(
-                f"  dip_revert (5% under 2 h avg; target avg/+5%, stop -10%, 2 h max): n {len(vals)} "
+                f"  dip_revert [{tier}] (5% under 2 h avg; target avg/+5%, stop -10%, 2 h max): n {len(vals)} "
                 f"mean {statistics.mean(vals):+.1%} median {statistics.median(vals):+.1%} "
                 f"win {sum(v > 0 for v in vals) / len(vals):.0%} exits {dict(Counter(r['long_why'] for r in dr))} "
                 f"~{len(vals) / max(hrs, 1):.1f}/h coins {len({r['mint'] for r in dr})}"
