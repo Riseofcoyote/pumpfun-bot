@@ -47,6 +47,19 @@ def trending(path: str) -> None:
     except OSError as e:
         print(f"trending: {e}")
         return
+    mints = defaultdict(set)
+    for r in rows:
+        mints[(r.get("symbol") or "").upper()].add(r.get("mint"))
+    relaunch = {s for s, m in mints.items() if len(m) >= 2}
+    print(f"relaunch tickers (one symbol on 2+ mints): {sorted(relaunch)}")
+    trending_part(rows, "all")
+    trending_part(
+        [r for r in rows if (r.get("symbol") or "").upper() not in relaunch],
+        "excluding relaunch tickers",
+    )
+
+
+def trending_part(rows: list[dict], label: str) -> None:
     trades = []
     for r in rows:
         if r.get("reason") == "retired":
@@ -57,7 +70,7 @@ def trending(path: str) -> None:
         except (KeyError, ValueError, TypeError):
             continue
         trades.append(r)
-    print(f"=== TRENDING {len(trades)} closed trades", end="")
+    print(f"\n=== TRENDING [{label}] {len(trades)} closed trades", end="")
     if not trades:
         print()
         return
@@ -70,6 +83,12 @@ def trending(path: str) -> None:
         print(
             f"  {r['time_utc']} {r['sid'][:14]:14} {r['symbol'][:10]:10} "
             f"{r['reason'][:12]:12} {r['_ret']:+.1%} held {r['held_min']}m"
+        )
+    print("-- last 8 trades")
+    for r in trades[-8:]:
+        print(
+            f"  {r['time_utc']} {r['sid'][:8]:8} {r['family'][:13]:13} "
+            f"{r['symbol'][:10]:10} {r['reason'][:12]:12} {r['_ret']:+.1%}"
         )
     by = defaultdict(lambda: defaultdict(list))
     for r in trades:
@@ -160,7 +179,23 @@ def devwatch(path: str) -> None:
                     pass
             if vals:
                 groups[k] = vals
-        table(f"rule {rule} (end=ok rows; skip rows excluded)", groups, 1, 12)
+        table(f"rule {rule} (end ok/blank; skip rows excluded)", groups, 1, 12)
+        best = []
+        for k, rs in kinds.items():
+            if k == "control":
+                continue
+            for r in rs:
+                try:
+                    best.append((float(r.get(f"{rule}_net") or "x"), k, r))
+                except ValueError:
+                    pass
+        best.sort(key=lambda x: -x[0])
+        for v, k, r in best[:4]:
+            print(
+                f"    top {k[:10]:10} {r['symbol'][:10]:10} {v:+8.1%} peak "
+                f"{r['peak_mult']} grad {r['graduated']} m60 {r['mult_m60']} "
+                f"end {r.get('end') or '-'} why {r.get(f'{rule}_why')} {r['time_utc']}"
+            )
     # Time halves for the main signal vs control under each rule.
     print("\n-- halves by kind (sum net, end=ok) per rule: first half / second half")
     for rule in rules:
