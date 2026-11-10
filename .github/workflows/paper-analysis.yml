@@ -1,0 +1,30 @@
+# Read-only: copies the trending and devwatch paper result files off the Fly
+# volume and prints compact tables (tools/paper_analysis.py). Moves no funds.
+name: Paper analysis
+on: workflow_dispatch
+permissions:
+  contents: read
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+      APP: pumpfun-bot-w1afdq
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - name: Fetch result files
+        run: |
+          flyctl ssh console -a "$APP" -C "sh -c 'cd /data/trades && tar czf - trending/trades.csv trending/leaderboard.txt devwatch/results.csv devwatch/report.txt 2>/dev/null | base64 -w0'" > out.b64 || true
+          base64 -d out.b64 | tar xzf - || true
+          ls -la trending devwatch || true
+      - name: Devwatch report
+        run: cat devwatch/report.txt || true
+      - name: Trending leaderboard (head)
+        run: head -60 trending/leaderboard.txt || true
+      - name: Analysis
+        run: python tools/paper_analysis.py trending/trades.csv devwatch/results.csv
