@@ -89,6 +89,7 @@ VARIANTS = [
     ("hold2m", None, None, None, None, 120),
 ]
 RULES = [v[0] for v in VARIANTS]
+QUICK = RULES.index("quick")
 KINDS = [
     "penny_pair", "penny_triple", "same_pair", "same_triple",
     "same_wallet_pair", "sell_pair", "control",
@@ -237,7 +238,7 @@ class VolBot:
         self.pending_unsub: deque[int] = deque()
         self.sub_queue: deque[Coin] = deque()
         self.open: list[Pos] = []
-        self.done: list[dict] = []
+        self.done: list[Result] = []
         self.stats: Counter = Counter()
         self.last_admit = 0.0
         self.req_id = 1000
@@ -249,7 +250,11 @@ class VolBot:
         f = DATA / "results.csv"
         if f.exists():
             with f.open() as fh:
-                self.done = list(csv.DictReader(fh))
+                for r in csv.DictReader(fh):
+                    try:
+                        self.done.append(Result(r))
+                    except (KeyError, TypeError, ValueError):
+                        self.stats["bad_result_rows"] += 1
 
     def record(self, p: Pos) -> None:
         tape = p.coin.tape[p.idx0 :]
@@ -278,7 +283,7 @@ class VolBot:
             why, net, _ = p.exits[name]
             row[f"{name}_net"] = round(net, 4)
             row[f"{name}_why"] = why
-        self.done.append(row)
+        self.done.append(Result(row))
         f = DATA / "results.csv"
         new = not f.exists()
         with f.open("a", newline="") as fh:
@@ -550,31 +555,31 @@ class VolBot:
         ]
         by = defaultdict(list)
         for r in rows:
-            by[r["kind"]].append(r)
+            by[r.kind].append(r)
         for kind in KINDS:
             rs = by.get(kind)
             if not rs:
                 continue
             cells = []
-            for name in RULES:
-                nets = [float(r[f"{name}_net"]) for r in rs]
+            for i, _name in enumerate(RULES):
+                nets = [r.nets[i] for r in rs]
                 cells.append(
                     f"{statistics.mean(nets) * 100:+5.1f}/{statistics.median(nets) * 100:+5.1f}/"
                     f"{sum(n > 0 for n in nets) / len(nets):3.0%}"
                 )
-            peaks = sum(float(r["peak_mult"]) >= 1.2 for r in rs) / len(rs)
-            m60 = [float(r["m60"]) for r in rs if r["m60"] not in ("", None)]
+            peaks = sum(r.peak >= 1.2 for r in rs) / len(rs)
+            m60 = [r.m60 for r in rs if r.m60 is not None]
             lines.append(
-                f" {kind:17}{len(rs):>5}{len({r['mint'] for r in rs}):>6}  "
+                f" {kind:17}{len(rs):>5}{len({r.mint for r in rs}):>6}  "
                 + "".join(f"{c:>17}" for c in cells)
                 + f"{peaks:>9.0%}{(statistics.median(m60) - 1) * 100 if m60 else 0:>+7.1f}%"
             )
         lines += ["", "penny_pair by coin age (quick exit mean / n):"]
         for lo, hi in ((0, 60), (60, 180), (180, 600), (600, 99999)):
             for kind in ("penny_pair", "control"):
-                rs = [r for r in by.get(kind, []) if lo <= float(r["coin_age_s"]) < hi]
+                rs = [r for r in by.get(kind, []) if lo <= r.age < hi]
                 if rs:
-                    m = statistics.mean(float(r["quick_net"]) for r in rs)
+                    m = statistics.mean(r.nets[QUICK] for r in rs)
                     lines.append(
                         f"  age {lo:>4}-{hi:<5}s {kind:11} {m * 100:+6.1f}%  n {len(rs)}"
                     )
@@ -582,6 +587,27 @@ class VolBot:
             "(compare every pattern with control: only a gap over control is an edge)"
         )
         return "\n".join(lines)
+
+
+class Result:
+    """The fields ``report`` reads from one result row.
+
+    Every result is held in memory for the report; full CSV rows as dicts grew the
+    process past 150 MB and got the shared 512 MB machine OOM-killed every few
+    hours. ``nets`` follows ``RULES``; ``m60`` is ``None`` when the position closed
+    before 60 s.
+    """
+
+    __slots__ = ("age", "kind", "m60", "mint", "nets", "peak")
+
+    def __init__(self, row: dict) -> None:
+        self.kind = sys.intern(row["kind"])
+        self.mint = sys.intern(row["mint"])
+        self.age = float(row["coin_age_s"])
+        self.peak = float(row["peak_mult"])
+        m60 = row.get("m60")
+        self.m60 = float(m60) if m60 not in ("", None) else None
+        self.nets = tuple(float(row[f"{n}_net"]) for n in RULES)
 
 
 def _r(x: float | None) -> str:
