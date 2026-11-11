@@ -36,7 +36,7 @@ RANGES: dict[str, tuple[float, float, str]] = {
     "min_liq": (50_000, 500_000, "log"),
     "max_mcap": (200_000, 200_000_000, "log"),
     "min_age_h": (6, 72, "f"),
-    "max_age_h": (24, 5_000, "log"),
+    "max_age_h": (10, 5_000, "log"),
     "max_rank": (8, 60, "i"),
     "m5_min": (-0.10, 0.05, "f"),
     "m5_max": (0.02, 0.10, "f"),

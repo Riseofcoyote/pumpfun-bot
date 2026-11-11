@@ -567,8 +567,47 @@ SEEDS_V6 = [
     )
 ]
 
+# v7: through Nov 11 every pool-age band over 12 h lost money outside the
+# relaunch tickers, while young pump.fun pools (6-12 h) grinding up broke even,
+# and the new tickers OPNW, UODF, USOE and CASHTAG made +2-5% a trade there.
+# These test whether a young, steadily rising PumpSwap pool pays on its own,
+# without the relaunch history. The farm dumps seen so far came at 12-24 h.
+_V7_BASE = _V5_BASE | {
+    "min_age_h": 6,
+    "max_age_h": 12,
+    "pump_only": True,
+    "h1_min": 0.0,
+    "h6_min": 0.1,
+    "tp": 0.25,
+    "trail_act": 0.12,
+    "trail_dist": 0.06,
+}
+SEEDS_V7 = [
+    _V7_BASE
+    | {
+        "family": fam,
+        "source": src,
+        "max_rank": 25,
+        "sl": sl,
+        "use_trail": trail,
+        "max_hold_min": hold,
+    }
+    for fam, src, sl, trail, hold in (
+        ("volume_leader", "volume", 0.45, False, 55),
+        ("volume_leader", "volume", 0.20, False, 55),
+        ("momentum", "any", 0.45, False, 55),
+        ("momentum", "any", 0.45, True, 90),
+    )
+]
+
 # Seed sets added to a running population once each, in this order.
-INJECTED_SEEDS = {"v3": SEEDS_V3, "v4": SEEDS_V4, "v5": SEEDS_V5, "v6": SEEDS_V6}
+INJECTED_SEEDS = {
+    "v3": SEEDS_V3,
+    "v4": SEEDS_V4,
+    "v5": SEEDS_V5,
+    "v6": SEEDS_V6,
+    "v7": SEEDS_V7,
+}
 
 SEEDS = [
     # Hand-built starting points, one or more per family; evolution takes over.
@@ -730,7 +769,8 @@ class Engine:
         # XTEN/PREDICT relaunches paid steadily while young and were rugged at
         # 18-24 h, so blocking them outright also blocked the one steady winner.
         relaunch = {
-            r["mint"] for r in snap.values()
+            r["mint"]
+            for r in snap.values()
             if self.relaunched(r, now) and r["age_h"] > RELAUNCH_YOUNG_H
         }
         logged = getattr(self, "_relaunch_logged", set())
@@ -837,9 +877,11 @@ class Engine:
             with path.open(newline="") as f:
                 for row in csv.DictReader(f):
                     try:
-                        t = datetime.strptime(
-                            row["time_utc"], "%Y-%m-%dT%H:%M:%SZ"
-                        ).replace(tzinfo=UTC).timestamp()
+                        t = (
+                            datetime.strptime(row["time_utc"], "%Y-%m-%dT%H:%M:%SZ")
+                            .replace(tzinfo=UTC)
+                            .timestamp()
+                        )
                     except (KeyError, ValueError):
                         continue
                     sym, mint = (row.get("symbol") or "").upper(), row.get("mint")
@@ -1296,18 +1338,28 @@ def record_snapshot(snap: dict[str, dict], now: float) -> None:
         d.mkdir(exist_ok=True)
         pools = [
             {
-                "mint": r["mint"], "pool": r["pool"], "sym": r["symbol"], "dex": r["dex"],
-                "sol": r["quote_is_sol"], "px": r["price"], "liq": round(r["liq"]),
-                "mcap": round(r["mcap"]), "age": round(r["age_h"], 2),
+                "mint": r["mint"],
+                "pool": r["pool"],
+                "sym": r["symbol"],
+                "dex": r["dex"],
+                "sol": r["quote_is_sol"],
+                "px": r["price"],
+                "liq": round(r["liq"]),
+                "mcap": round(r["mcap"]),
+                "age": round(r["age_h"], 2),
                 "pc": {k: round(v, 5) for k, v in r["pc"].items()},
-                "tx": r["tx"], "vol": {k: round(v) for k, v in r["vol"].items()},
+                "tx": r["tx"],
+                "vol": {k: round(v) for k, v in r["vol"].items()},
                 "rk": r["ranks"],
             }
             for r in snap.values()
         ]
         day = datetime.fromtimestamp(now, UTC).strftime("%Y-%m-%d")
         with gzip.open(d / f"{day}.jsonl.gz", "at") as f:
-            f.write(json.dumps({"t": round(now), "pools": pools}, separators=(",", ":")) + "\n")
+            f.write(
+                json.dumps({"t": round(now), "pools": pools}, separators=(",", ":"))
+                + "\n"
+            )
         cutoff = now - SNAP_KEEP_DAYS * 86400
         for old in d.glob("*.jsonl.gz"):
             if old.stat().st_mtime < cutoff:
