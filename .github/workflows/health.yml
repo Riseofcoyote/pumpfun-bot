@@ -17,8 +17,8 @@ jobs:
         run: |
           flyctl status -a "$APP" || true
           for id in $(flyctl machine list -a "$APP" -q 2>/dev/null); do
-            flyctl machine status "$id" -a "$APP" -d | tail -40 || true
+            flyctl machine status "$id" -a "$APP" | sed -n '/Event Logs/,$p' | head -30 || true
           done
       - name: Testers - status lines and tracebacks
         run: |
-          flyctl ssh console -a "$APP" -C "sh -c 'uptime; for d in trending devwatch narrative volbot farmlive kolwatch; do f=/data/trades/\$d/engine.log; [ -f \$f ] || continue; echo; echo \"===== \$d\"; ls -la \$f; grep -a \"status\" \$f | tail -3; echo \"-- tracebacks (last 2)\"; grep -a -n -A 12 Traceback \$f | tail -40; echo \"-- errors\"; grep -a ERROR \$f | tail -8; done'" || true
+          flyctl ssh console -a "$APP" -C "sh -c 'cat /proc/loadavg; free -m 2>/dev/null || head -3 /proc/meminfo; ps -eo pid,rss,etime,args 2>/dev/null | grep -a python | grep -v grep; for d in trending devwatch narrative volbot farmlive kolwatch; do f=/data/trades/\$d/engine.log; [ -f \$f ] || continue; echo; echo \"===== \$d\"; ls -la \$f; grep -a \"status\" \$f | tail -3; echo \"-- tracebacks (last 2)\"; grep -a -n -A 12 Traceback \$f | tail -40; echo \"-- errors\"; grep -a ERROR \$f | tail -8; done'" || true
