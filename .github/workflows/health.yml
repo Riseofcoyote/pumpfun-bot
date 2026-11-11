@@ -1,0 +1,24 @@
+# Read-only health check: machine state and restart events, and for every
+# tester the last status lines and the most recent tracebacks. Moves no funds.
+name: Health
+on: workflow_dispatch
+permissions:
+  contents: read
+jobs:
+  health:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+      APP: pumpfun-bot-w1afdq
+    steps:
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - name: Machine status and events
+        run: |
+          flyctl status -a "$APP" || true
+          for id in $(flyctl machine list -a "$APP" -q 2>/dev/null); do
+            flyctl machine status "$id" -a "$APP" -d | tail -40 || true
+          done
+      - name: Testers - status lines and tracebacks
+        run: |
+          flyctl ssh console -a "$APP" -C "sh -c 'uptime; for d in trending devwatch narrative volbot farmlive kolwatch; do f=/data/trades/\$d/engine.log; [ -f \$f ] || continue; echo; echo \"===== \$d\"; ls -la \$f; grep -a \"status\" \$f | tail -3; echo \"-- tracebacks (last 2)\"; grep -a -n -A 12 Traceback \$f | tail -40; echo \"-- errors\"; grep -a ERROR \$f | tail -8; done'" || true
