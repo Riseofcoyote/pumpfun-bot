@@ -61,6 +61,8 @@ MIN_PER_FAMILY = 5
 MAX_FAMILY_SHARE = 0.4
 # A candidate must spread its trades: riding one or two tokens that happened to
 # trend all day is market beta, not a rule that transfers.
+# Both count tickers, not mints: a serial relaunch (XTEN, PREDICT) is one bet on
+# one farm however many mints it comes back as.
 CANDIDATE_MIN_TOKENS = 15
 CANDIDATE_MAX_TOKEN_SHARE = 0.25
 # v2: pools under MIN_POOL_AGE_H are excluded and holds are longer. v1 results
@@ -164,6 +166,7 @@ def new_stats() -> dict:
         "rets": [],
         "exits": {},
         "mints": {},
+        "syms": {},
     }
 
 
@@ -197,10 +200,10 @@ def is_candidate(st: dict) -> bool:
     if st["n"] < CANDIDATE_MIN_TRADES or len(r) < CANDIDATE_MIN_TRADES:
         return False
     h = len(r) // 2
-    mints = st.get("mints") or {}
-    if len(mints) < CANDIDATE_MIN_TOKENS:
+    toks = st.get("syms") or st.get("mints") or {}
+    if len(toks) < CANDIDATE_MIN_TOKENS:
         return False
-    if max(mints.values()) > CANDIDATE_MAX_TOKEN_SHARE * sum(mints.values()):
+    if max(toks.values()) > CANDIDATE_MAX_TOKEN_SHARE * sum(toks.values()):
         return False
     return (
         st["sum"] / st["n"] > 0.005
@@ -891,6 +894,27 @@ class Engine:
         except OSError as e:
             logger.warning(f"ticker backfill failed: {e}")
 
+    def backfill_tickers(self, path: Path) -> None:
+        """Rebuild per-strategy ticker counts from the ledger for older state."""
+        need = {s["id"]: s for s in self.strategies if not s["stats"].get("syms")}
+        need = {k: s for k, s in need.items() if s["stats"]["n"]}
+        if not need or not path.exists():
+            return
+        counts: dict[str, dict[str, int]] = {}
+        try:
+            with path.open(newline="") as f:
+                for row in csv.DictReader(f):
+                    sid = row.get("sid")
+                    if sid in need:
+                        sym = (row.get("symbol") or row.get("mint") or "?").upper()
+                        c = counts.setdefault(sid, {})
+                        c[sym] = c.get(sym, 0) + 1
+        except OSError as e:
+            logger.warning(f"ticker count backfill failed: {e}")
+            return
+        for sid, c in counts.items():
+            need[sid]["stats"]["syms"] = c
+
     def on_quotes(self, q: dict[str, dict]) -> None:
         """Mark open positions to the latest prices and close any that exit."""
         now = time.time()
@@ -982,6 +1006,9 @@ class Engine:
             st["exits"][reason] = st["exits"].get(reason, 0) + 1
             mints = st.setdefault("mints", {})
             mints[p["mint"]] = mints.get(p["mint"], 0) + 1
+            syms = st.setdefault("syms", {})
+            sym = (p.get("symbol") or p["mint"]).upper()
+            syms[sym] = syms.get(sym, 0) + 1
             self.cooldown[f"{s['id']}:{p['mint']}"] = now + s["cooldown_min"] * 60
             if is_candidate(st) and s["id"] not in self.candidates:
                 self.candidates[s["id"]] = {
@@ -1157,7 +1184,8 @@ class Engine:
             f"{s['id']} g{s['gen']} n={st['n']} win {st['wins'] / st['n']:.0%} "
             f"avg {st['sum'] / st['n']:+.2%} PF {profit_factor(st):.2f} "
             f"total {st['sum'] * SIZE_SOL:+.4f} SOL "
-            f"tokens {len(st.get('mints') or {})} | {describe(s)}"
+            f"tokens {len(st.get('mints') or {})} "
+            f"tickers {len(st.get('syms') or {})} | {describe(s)}"
         )
 
     def report(self) -> str:
@@ -1265,6 +1293,12 @@ class Engine:
         self.cooldown = {k: v for k, v in self.cooldown.items() if v > now}
         self.symbol_mints = state.get("symbol_mints") or {}
         self.backfill_symbols(DATA / "trades.csv")
+        self.backfill_tickers(DATA / "trades.csv")
+        self.candidates = {
+            k: v
+            for k, v in self.candidates.items()
+            if k not in self.by_id() or is_candidate(self.by_id()[k]["stats"])
+        }
         return True
 
     def _inject(self, tag: str, specs: list[dict]) -> None:
