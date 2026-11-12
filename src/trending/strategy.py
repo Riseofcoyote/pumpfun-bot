@@ -19,6 +19,10 @@ SOURCES = ("any", "trend5m", "trend1h", "volume")
 # Pools younger than this are fresh launches, not the established trending and
 # top-volume tokens this engine is for; no strategy may buy them.
 MIN_POOL_AGE_H = 6.0
+# Through Nov 12 every pool-age band over 12 h lost after costs in every family
+# and in both halves (about 1,500 trades, 560 distinct entries, 75 tickers),
+# while 6-12 h pools made money. No strategy may buy a pool older than this.
+MAX_POOL_AGE_H = 12.0
 # Hard entry limits no genome can relax. Pools under $50k liquidity and buys
 # into a 5-minute candle already up 10% lost after costs in every ledger so far.
 MIN_LIQ_USD = 50_000.0
@@ -35,8 +39,8 @@ MAX_ENTRY_H1 = 0.15
 RANGES: dict[str, tuple[float, float, str]] = {
     "min_liq": (50_000, 500_000, "log"),
     "max_mcap": (200_000, 200_000_000, "log"),
-    "min_age_h": (6, 72, "f"),
-    "max_age_h": (10, 5_000, "log"),
+    "min_age_h": (6, MAX_POOL_AGE_H - 1, "f"),
+    "max_age_h": (7, MAX_POOL_AGE_H, "f"),
     "max_rank": (8, 60, "i"),
     "m5_min": (-0.10, 0.05, "f"),
     "m5_max": (0.02, 0.10, "f"),
@@ -66,7 +70,7 @@ LOOSE = {
     "min_t5_rank": 1.0,
     "max_mcap": 200_000_000.0,
     "min_age_h": 6.0,
-    "max_age_h": 5_000.0,
+    "max_age_h": MAX_POOL_AGE_H,
     "h6_min": -0.5,
     "h24_min": -0.9,
     "h24_max": MAX_ENTRY_H24,
@@ -184,7 +188,7 @@ def entry_signal(s: dict, rec: dict, prev_ranks: dict[str, int] | None) -> bool:
     ``prev_ranks`` is the record's ranks from the previous snapshot, or None if
     the pool was not listed then.
     """
-    if rec["age_h"] < MIN_POOL_AGE_H:
+    if not MIN_POOL_AGE_H <= rec["age_h"] <= MAX_POOL_AGE_H:
         return False
     if rec["liq"] < max(MIN_LIQ_USD, s["min_liq"]) or rec["mcap"] > s["max_mcap"]:
         return False
