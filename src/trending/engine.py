@@ -603,6 +603,27 @@ SEEDS_V7 = [
     )
 ]
 
+# v8: through Nov 13 returns in 6-12 h PumpSwap pools fell steadily with entry
+# age (6-8 h +3.5% a trade, 11-12 h +1.7%) and the farm rugs came after 12 h.
+# These copy the leading volume_leader genome into 4-6 h and 4-8 h pools to see
+# whether the edge keeps rising toward graduation or the young pools rug.
+SEEDS_V8 = [
+    _V5_BASE
+    | {
+        "family": "volume_leader",
+        "source": "volume",
+        "max_rank": 25,
+        "min_age_h": lo,
+        "max_age_h": hi,
+        "pump_only": True,
+        "tp": 0.25,
+        "sl": sl,
+        "use_trail": False,
+        "max_hold_min": 55,
+    }
+    for lo, hi, sl in ((4, 6, 0.45), (4, 6, 0.20), (4, 8, 0.45))
+]
+
 # Seed sets added to a running population once each, in this order.
 INJECTED_SEEDS = {
     "v3": SEEDS_V3,
@@ -610,6 +631,7 @@ INJECTED_SEEDS = {
     "v5": SEEDS_V5,
     "v6": SEEDS_V6,
     "v7": SEEDS_V7,
+    "v8": SEEDS_V8,
 }
 
 SEEDS = [

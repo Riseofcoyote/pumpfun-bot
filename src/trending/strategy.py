@@ -17,8 +17,9 @@ FAMILIES = ("momentum", "dip", "surge", "fresh_trend", "volume_leader")
 SEARCH_FAMILIES = ("momentum", "dip", "surge", "volume_leader")
 SOURCES = ("any", "trend5m", "trend1h", "volume")
 # Pools younger than this are fresh launches, not the established trending and
-# top-volume tokens this engine is for; no strategy may buy them.
-MIN_POOL_AGE_H = 6.0
+# top-volume tokens this engine is for; no strategy may buy them. Returns in
+# 6-12 h pools fall steadily with age (6-8 h best), so 4-6 h is open to test.
+MIN_POOL_AGE_H = 4.0
 # Through Nov 12 every pool-age band over 12 h lost after costs in every family
 # and in both halves (about 1,500 trades, 560 distinct entries, 75 tickers),
 # while 6-12 h pools made money. No strategy may buy a pool older than this.
@@ -39,8 +40,8 @@ MAX_ENTRY_H1 = 0.15
 RANGES: dict[str, tuple[float, float, str]] = {
     "min_liq": (50_000, 500_000, "log"),
     "max_mcap": (200_000, 200_000_000, "log"),
-    "min_age_h": (6, MAX_POOL_AGE_H - 1, "f"),
-    "max_age_h": (7, MAX_POOL_AGE_H, "f"),
+    "min_age_h": (MIN_POOL_AGE_H, MAX_POOL_AGE_H - 1, "f"),
+    "max_age_h": (MIN_POOL_AGE_H + 1, MAX_POOL_AGE_H, "f"),
     "max_rank": (8, 60, "i"),
     "m5_min": (-0.10, 0.05, "f"),
     "m5_max": (0.02, 0.10, "f"),
@@ -69,7 +70,7 @@ LOOSE = {
     "min_liq": 50_000.0,
     "min_t5_rank": 1.0,
     "max_mcap": 200_000_000.0,
-    "min_age_h": 6.0,
+    "min_age_h": MIN_POOL_AGE_H,
     "max_age_h": MAX_POOL_AGE_H,
     "h6_min": -0.5,
     "h24_min": -0.9,
