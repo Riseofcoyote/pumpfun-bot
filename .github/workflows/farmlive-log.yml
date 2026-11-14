@@ -1,0 +1,20 @@
+# Prints farmlive's log lines matching a pattern (all rotated files). Read-only.
+name: Farmlive log
+on:
+  workflow_dispatch:
+    inputs:
+      pattern:
+        description: grep -E pattern
+        required: true
+permissions:
+  contents: read
+jobs:
+  log:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+    steps:
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - run: |
+          flyctl ssh console -a pumpfun-bot-w1afdq -C "sh -c 'cd /data/trades/farmlive && cat state.json; grep -a -h -E \"${{ inputs.pattern }}\" engine.log.3 engine.log.2 engine.log.1 engine.log 2>/dev/null | tail -150'"
