@@ -47,6 +47,7 @@ TRAIL = 0.20
 LIQ_DROP = 0.35  # liquidity pulled this far below entry is the usual lead-in to a rug
 LIQ_EVERY = 120
 POOL_FEE = 0.0125
+EXEC_CHECK_EVERY = 120  # seconds between real Jupiter sell quotes on open positions
 HELD_EVERY = 180
 RELAUNCH_PROOF_H = 7 * 24  # a learned ticker needs 2+ mints within this window  # seconds between wallet checks for positions sold by hand
 SEARCH_EVERY = 300
@@ -344,7 +345,9 @@ class FarmLive:
             if sym not in FARM_SEED_SYMBOLS and len(recent) < 2:
                 continue
             for r in pools:
-                if farm_rule(r) and r["mint"] not in self.bought:
+                # PumpSwap only: the XTEN/PREDICT pattern is PumpSwap; FLYDOG (Meteora DBC)
+                # was pulled while DexScreener kept quoting its last price.
+                if r.get("dex") == "pumpswap" and farm_rule(r) and r["mint"] not in self.bought:
                     out.append(r)
         return sorted(out, key=lambda r: r["age_h"])
 
@@ -388,11 +391,22 @@ class FarmLive:
             pos.setdefault("liq0", pos["liq"])
         except (TypeError, KeyError, ValueError):
             px = None
-        if px and dec is not None:
+        ds_val = pos["tokens"] / 10**dec * px * (1 - POOL_FEE) if px and dec is not None else None
+        now = time.time()
+        if ds_val is not None and now - pos.get("exec_at", 0) < EXEC_CHECK_EVERY:
             self.rate_limited = False
-            return pos["tokens"] / 10**dec * px * (1 - POOL_FEE)
+            return ds_val
+        # What a sell would really return. DexScreener can keep quoting a pulled pool.
+        pos["exec_at"] = now
         q = self.quote(pos["mint"], SOL_MINT, pos["tokens"], SELL_SLIPPAGE_BPS)
-        return int(q["outAmount"]) / 1e9 if q else None
+        if q:
+            exec_val = int(q["outAmount"]) / 1e9
+            pos["exec_sol"] = exec_val
+            pos["no_route"] = 0
+            return min(exec_val, ds_val) if ds_val is not None else exec_val
+        if not self.rate_limited:
+            pos["no_route"] = pos.get("no_route", 0) + 1
+        return ds_val
 
     def selftest(self) -> None:
         """One small real buy and sell to prove the swap path before full size."""
@@ -456,6 +470,8 @@ class FarmLive:
                 why = f"trail: {v:.4f} vs peak {pos['peak_sol']:.4f} SOL"
             elif pos["fails"] >= 10:
                 why = "no quote for 5 min"
+            elif pos.get("no_route", 0) >= 3:
+                why = "no sell route on 3 executable checks"
             if why and self.sell(pos, why):
                 self.positions.pop(mint)
             self.save()
