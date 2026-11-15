@@ -35,6 +35,9 @@ MAX_ENTRY_H24 = 2.0
 # Entries into a pool already up more than 15% over the last hour lost about 9%
 # net (7% before costs) in every family and on every day, across 30 tokens.
 MAX_ENTRY_H1 = 0.15
+# 5-minute buys/sells over this lost 4-5% a trade in both halves of Nov 4-14,
+# in every family, across about 430 entries and 100+ tickers; 1.0-1.2 was best.
+MAX_ENTRY_BUY_RATIO = 1.2
 
 # name -> (low, high, kind). kind "f" float, "i" int, "log" float sampled in log space.
 RANGES: dict[str, tuple[float, float, str]] = {
@@ -50,7 +53,7 @@ RANGES: dict[str, tuple[float, float, str]] = {
     "h6_min": (-0.5, 2.0, "f"),
     "h24_min": (-0.9, 1.5, "f"),
     "h24_max": (0.2, MAX_ENTRY_H24, "log"),
-    "buy_ratio_min": (0.6, 1.8, "f"),
+    "buy_ratio_min": (0.6, MAX_ENTRY_BUY_RATIO - 0.05, "f"),
     "min_m5_vol": (500, 60_000, "log"),
     "min_m5_buyers": (0, 60, "i"),
     "surge_k": (1.2, 5.0, "f"),
@@ -209,6 +212,8 @@ def entry_signal(s: dict, rec: dict, prev_ranks: dict[str, int] | None) -> bool:
     if t5 is not None and t5 < s.get("min_t5_rank", 1.0):
         return False
     ratio = tx["buys"] / max(tx["sells"], 1)
+    if ratio > MAX_ENTRY_BUY_RATIO:
+        return False
     if ratio < s["buy_ratio_min"] or vol["m5"] < s["min_m5_vol"]:
         return False
     if tx["buyers"] < s["min_m5_buyers"]:

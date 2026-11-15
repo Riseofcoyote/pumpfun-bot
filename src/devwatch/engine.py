@@ -57,6 +57,9 @@ GRAD_SIDE = 0.01  # per-side cost once trading on PumpSwap
 # consecutive reads.
 GRAD_SPIKE = 3.0
 GRAD_SPIKE_READS = 3
+# Graduated paths recorded before this were valued at Jupiter's mid price, which
+# printed 36-160x right after migration; the report treats them as suspect.
+QUOTE_FIX_UTC = "2026-11-09T12:40:00Z"
 ENTRY_DELAY = 2.0  # seconds from create to our simulated buy
 TRACK_SECONDS = int(
     os.environ.get("DEVWATCH_TRACK_SECONDS", "3600")
@@ -1014,6 +1017,11 @@ class DevWatch:
             return True
         if r.get("end"):
             return False
+        if (
+            r.get("graduated") in ("True", True)
+            and r.get("time_utc", "") < QUOTE_FIX_UTC
+        ):
+            return True  # valued at Jupiter's mid price, not a sell quote
         try:
             m5, m60 = float(r["mult_m5"]), float(r["mult_m60"])
         except (KeyError, TypeError, ValueError):
@@ -1116,7 +1124,11 @@ class DevWatch:
                 continue
             cells = []
             for name in RULE_NAMES:
-                vals = [float(v) for r in rs if (v := r.get(f"{name}_net"))]
+                vals = [
+                    float(v)
+                    for r in rs
+                    if (v := r.get(f"{name}_net")) and not self.suspect(r)
+                ]
                 cell = f"{statistics.mean(vals):+.1%}" if vals else "-"
                 if vals and name not in BASE_RULES:
                     cell += f"/{len(vals)}"
@@ -1128,7 +1140,8 @@ class DevWatch:
                 + "  ".join(cells)
             )
         lines.append(
-            "  (means; one big winner can carry a column, so read them with peak>2x and devs;"
+            "  (means without suspect rows; one big winner can carry a column, so read them"
+            " with peak>2x and devs;"
             " d5/d15 columns are mean/trades entered late, older rows have none)"
         )
         lines.extend(self.robust_lines(by))
