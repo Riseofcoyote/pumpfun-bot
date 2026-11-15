@@ -35,6 +35,15 @@ jobs:
               print(p, v, "gt price", snap[p]["price"])
           print("price sources:", {s: sum(v["src"] == s for v in q.values()) for s in ("jup", "ds")})
           print("SOL", feeds.sol_usd())
+          print("decimals known:", sum(snap[p]["mint"] in feeds.DECIMALS for p in q), "of", len(q))
+          for p in list(q)[:3]:
+              m = snap[p]["mint"]
+              dec = feeds.DECIMALS.get(m)
+              if dec is None:
+                  continue
+              raw = int(30 / q[p]["price"] * 10**dec)  # about $30 of the token
+              out = feeds.jup_sell_lamports(m, raw)
+              print(f"sell quote {snap[p]['symbol']}: $30 at mid -> {out} lamports, dec {dec}")
           PY
       - name: Run engine
         working-directory: src

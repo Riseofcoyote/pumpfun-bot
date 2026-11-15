@@ -51,6 +51,7 @@ QUOTE_S = 5  # price checks on open positions
 MAX_OPEN = 3  # positions per strategy
 FEE_SIDE = 0.006  # DEX fee + priority/network fee, per side
 LATENCY_SIDE = 0.004  # price moving between decision and fill, per side
+EXEC_NET_FEE = 0.002  # priority/network fee on a sell priced by the router quote
 MIN_TRADES_RANKED = 6
 CANDIDATE_MIN_TRADES = 60
 MIN_PER_FAMILY = 5
@@ -937,9 +938,48 @@ class Engine:
         for sid, c in counts.items():
             need[sid]["stats"]["syms"] = c
 
-    def on_quotes(self, q: dict[str, dict]) -> None:
-        """Mark open positions to the latest prices and close any that exit."""
+    def exec_floor(
+        self, p: dict, sell_fn, cache: dict[str, float | None]
+    ) -> float | None:
+        """Net return a real sell would get now, from an executable sell quote.
+
+        ``None`` when the mint's decimals are unknown or the router gives no
+        answer. A quote that finds no route or pays nothing counts as a total
+        loss: farmlive's live sells into pulled young PumpSwap pools paid 0-0.2%
+        of cost while DexScreener still showed the old price and liquidity.
+        """
+        if sell_fn is None or not self.sol_usd:
+            return None
+        dec = feeds.DECIMALS.get(p["mint"])
+        if dec is None:
+            return None
+        if p["mint"] not in cache:
+            tokens = SIZE_SOL * self.sol_usd / p["entry_eff"]
+            raw = int(tokens * 10**dec)
+            try:
+                out = sell_fn(p["mint"], raw)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"[exec] sell quote {p['symbol']} failed: {e}")
+                cache[p["mint"]] = None
+                return None
+            if out is None:
+                # No route at all, or a failed call: only a pool that reads
+                # drained is taken as unsellable, so a router blip is not a rug.
+                fq_liq = p.get("liq_now") or p["liq0"]
+                cache[p["mint"]] = -0.99 if fq_liq < 0.3 * p["liq0"] else None
+            else:
+                got = out / 1e9 * (1 - LATENCY_SIDE - EXEC_NET_FEE)
+                cache[p["mint"]] = got / SIZE_SOL - 1
+        return cache[p["mint"]]
+
+    def on_quotes(self, q: dict[str, dict], sell_fn=None) -> None:
+        """Mark open positions to the latest prices and close any that exit.
+
+        ``sell_fn(mint, raw_amount) -> lamports | None`` prices each exit at an
+        executable quote; the recorded net is the lower of that and the model.
+        """
         now = time.time()
+        exec_cache: dict[str, float | None] = {}
         strat = self.by_id()
         size_usd = SIZE_SOL * self.sol_usd
         keep = []
@@ -1009,8 +1049,20 @@ class Engine:
                 keep.append(p)
                 continue
             liq = (fq or {}).get("liq") or p["liq0"]
+            p["liq_now"] = liq
             exit_eff = px * (1 - side_cost(liq, size_usd))
-            self._close(p, s, reason, px, exit_eff / p["entry_eff"] - 1, now)
+            net = exit_eff / p["entry_eff"] - 1
+            xq = self.exec_floor(p, sell_fn, exec_cache)
+            if xq is not None:
+                ctx = p.setdefault("ctx", {})
+                ctx["xq"], ctx["xm"] = round(xq, 4), round(net, 4)
+                if xq < net - 0.05:
+                    logger.warning(
+                        f"[exec] {p['symbol']} sell quote {xq:+.1%} vs model "
+                        f"{net:+.1%}; recording the quote"
+                    )
+                net = min(net, xq)
+            self._close(p, s, reason, px, net, now)
         self.positions = keep
 
     def _close(
@@ -1466,7 +1518,10 @@ def main() -> None:
                 logger.warning("empty discovery snapshot")
             next_disc = t + DISCOVER_S
         if eng.positions and t >= next_quote:
-            eng.on_quotes(feeds.quotes({p["pool"]: p["mint"] for p in eng.positions}))
+            eng.on_quotes(
+                feeds.quotes({p["pool"]: p["mint"] for p in eng.positions}),
+                feeds.jup_sell_lamports,
+            )
             next_quote = time.time() + QUOTE_S
         if t - eng.last_evolve >= EVOLVE_H * 3600:
             eng.evolve()

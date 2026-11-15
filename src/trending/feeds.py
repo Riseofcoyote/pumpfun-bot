@@ -202,6 +202,10 @@ JUP = "https://lite-api.jup.ag/price/v3"
 JUP_GATE = RateGate(50)
 
 
+# Mint -> decimals, filled from Jupiter price reads; sizes an exit sell quote.
+DECIMALS: dict[str, int] = {}
+
+
 def jup_prices(mints: list[str]) -> dict[str, float]:
     """USD price per mint from Jupiter's router (route-weighted, near real time)."""
     out: dict[str, float] = {}
@@ -211,6 +215,9 @@ def jup_prices(mints: list[str]) -> dict[str, float]:
             px = _f((v or {}).get("usdPrice")) if isinstance(v, dict) else 0.0
             if px > 0:
                 out[mint] = px
+            dec = v.get("decimals") if isinstance(v, dict) else None
+            if isinstance(dec, int) and 0 <= dec <= 12:
+                DECIMALS[mint] = dec
     return out
 
 

@@ -52,7 +52,9 @@ def check_mint(label: str, mint: str) -> None:
     prog = v["owner"]
     info = v["data"]["parsed"]["info"] if isinstance(v["data"], dict) else {}
     print(f"  program {'token-2022' if prog.startswith('Tokenz') else prog}")
-    print(f"  mintAuthority {info.get('mintAuthority')} freezeAuthority {info.get('freezeAuthority')}")
+    print(
+        f"  mintAuthority {info.get('mintAuthority')} freezeAuthority {info.get('freezeAuthority')}"
+    )
     for ext in info.get("extensions", []):
         print(f"  ext {ext.get('extension')}: {json.dumps(ext.get('state'))[:300]}")
 
@@ -85,10 +87,14 @@ def wallet_moves(mint: str) -> None:
             continue
         keys = [k["pubkey"] for k in tx["transaction"]["message"]["accountKeys"]]
         signers = [
-            k["pubkey"] for k in tx["transaction"]["message"]["accountKeys"] if k["signer"]
+            k["pubkey"]
+            for k in tx["transaction"]["message"]["accountKeys"]
+            if k["signer"]
         ]
         t = time.strftime("%m-%d %H:%M:%S", time.gmtime(tx["blockTime"]))
-        print(f"  {t} {sig[:16]} signers {[s[:8] for s in signers]} err {meta.get('err')}")
+        print(
+            f"  {t} {sig[:16]} signers {[s[:8] for s in signers]} err {meta.get('err')}"
+        )
         for idx in sorted(set(pre) | set(post)):
             a = (pre.get(idx) or {}).get("uiTokenAmount", {}).get("uiAmount")
             b = (post.get(idx) or {}).get("uiTokenAmount", {}).get("uiAmount")
@@ -104,9 +110,7 @@ def wallet_moves(mint: str) -> None:
 
 
 def main() -> None:
-    mints = (
-        {m[:8]: m for m in sys.argv[1:]} if len(sys.argv) > 1 else DEFAULT_MINTS
-    )
+    mints = {m[:8]: m for m in sys.argv[1:]} if len(sys.argv) > 1 else DEFAULT_MINTS
     for label, mint in mints.items():
         check_mint(label, mint)
         time.sleep(0.5)
