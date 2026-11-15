@@ -81,7 +81,11 @@ RUG_CRASH_TICKS = 3
 # A ticker seen on another mint within this window is a serial relaunch: PREDICT
 # and XTEN came back as a new mint each day, ground up 5%/hour, then dumped 70%.
 RELAUNCH_WINDOW_H = 72
-RELAUNCH_YOUNG_H = 12.0  # relaunched tickers stay tradable up to this pool age
+# Relaunched tickers stay tradable up to this pool age. 0 blocks them at any age:
+# farmlive's real buys of young relaunches (FLYDOG, AVATARS, BILL, ANTH twice)
+# all came back at 0-0.2% of cost within 15 h, and ANTH Azb3 had no Jupiter
+# route at 7.8 h while DexScreener still showed $139k liquidity.
+RELAUNCH_YOUNG_H = 0.0
 # A pool this calm over 1 h and 6 h cannot move enough in one hold to cover the
 # ~2% round trip; tokenized stocks, BTC/XMR wrappers and the like sit here.
 CALM_H1 = 0.03
@@ -791,9 +795,8 @@ class Engine:
         self.totals["snapshots"] += 1
         now = time.time()
         self._note_symbols(snap.values(), now)
-        # A relaunched ticker is skipped only once it is past RELAUNCH_YOUNG_H: the
-        # XTEN/PREDICT relaunches paid steadily while young and were rugged at
-        # 18-24 h, so blocking them outright also blocked the one steady winner.
+        # A relaunched ticker is skipped once it is past RELAUNCH_YOUNG_H. Paper
+        # fills on young relaunches looked steady; real fills on them did not.
         relaunch = {
             r["mint"]
             for r in snap.values()
