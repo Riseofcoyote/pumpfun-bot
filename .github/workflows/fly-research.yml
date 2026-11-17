@@ -1,0 +1,20 @@
+# Runs a read-only research script from tools/ on the Fly machine, where the
+# plan RPC (SOLANA_NODE_RPC_ENDPOINT) is available. Moves no funds.
+name: Fly research
+on:
+  workflow_dispatch:
+    inputs:
+      script:
+        description: Script in tools/ to run (with args)
+        default: callout_ticks.py
+permissions:
+  contents: read
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+    steps:
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - run: flyctl ssh console -a pumpfun-bot-w1afdq -C "sh -c 'cd /app && /app/.venv/bin/python -u tools/${{ inputs.script }}'"

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import statistics as st
 import struct
 import sys
@@ -25,7 +26,7 @@ import time
 import urllib.request
 
 CALLS = "https://raw.githubusercontent.com/Smurfetc/solana-memecoin-calls-dataset/main/calls.jsonl"
-RPC = "https://api.mainnet-beta.solana.com"
+RPC = os.environ.get("SOLANA_NODE_RPC_ENDPOINT") or "https://api.mainnet-beta.solana.com"
 PUMP = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
 TRADE_EVENT = bytes([189, 219, 127, 211, 78, 230, 97, 238])  # anchor event discriminator
 MIN_MC = float(sys.argv[1]) if len(sys.argv) > 1 else 20_000
@@ -34,7 +35,8 @@ FEE = 0.01
 LAG = 0.005
 SIZE_SOL = 0.1
 DELAYS = (0, 5, 10, 20, 30, 60)
-HOLDS = (10, 15, 20, 30, 60, 120, 300)
+HOLDS = (10, 15, 20, 30, 60, 120, 240)
+MAX_TXS = 700  # per call, from the call onward
 MAX_PAGES = 6  # 6,000 signatures back from now; busier coins are skipped
 
 
@@ -49,6 +51,8 @@ def rpc(method: str, params: list, tries: int = 6) -> dict | None:
                 raise OSError("429")
             return doc.get("result")
         except (OSError, ValueError):
+            time.sleep(1.5 * (k + 1))
+        except Exception:  # noqa: BLE001
             time.sleep(1.5 * (k + 1))
     return None
 
@@ -121,9 +125,10 @@ def main() -> None:
     results: dict[tuple, list[float]] = {}
     used = 0
     for c in rows:
-        sigs = sigs_around(curve_pda(c["mint"]), c["t"] - 60, c["t"] + 600)
+        sigs = sigs_around(curve_pda(c["mint"]), c["t"] - 30, c["t"] + 330)
+        sigs.reverse()  # oldest first: the trades right at the call matter most
         print(f"  {c['sym'][:10]:10} {len(sigs)} curve txs in the window", flush=True)
-        path = sorted(t for s in sigs[:400] for t in trades(s, c["mint"]))
+        path = sorted(t for s in sigs[:MAX_TXS] for t in trades(s, c["mint"]))
         if len(path) < 5:
             continue
         used += 1
