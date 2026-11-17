@@ -24,6 +24,7 @@ import struct
 import sys
 import time
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 
 CALLS = "https://raw.githubusercontent.com/Smurfetc/solana-memecoin-calls-dataset/main/calls.jsonl"
 RPC = os.environ.get("SOLANA_NODE_RPC_ENDPOINT") or "https://api.mainnet-beta.solana.com"
@@ -36,6 +37,7 @@ LAG = 0.005
 SIZE_SOL = 0.1
 DELAYS = (0, 5, 10, 20, 30, 60)
 HOLDS = (10, 15, 20, 30, 60, 120, 240)
+WORKERS = 12
 MAX_TXS = 700  # per call, from the call onward
 MAX_PAGES = 6  # 6,000 signatures back from now; busier coins are skipped
 
@@ -116,7 +118,19 @@ def sell_sol(vsol: float, vtok: float, tok: float) -> float:
     return (vsol - vsol * vtok / (vtok + tok)) * (1 - FEE)
 
 
+def table(results: dict, used: int) -> None:
+    print(f"\n--- after {used} calls: buy +Ds after call, sell Hs later: median / mean / win%", flush=True)
+    for d in DELAYS:
+        cells = []
+        for h in HOLDS:
+            x = results.get((d, h), [])
+            cells.append(f"{h:>3}s {st.median(x):+5.0%}/{st.mean(x):+5.0%}/{sum(v > 0 for v in x) / len(x):3.0%}"
+                         if x else f"{h:>3}s -")
+        print(f"  D{d:<3} " + " | ".join(cells), flush=True)
+
+
 def main() -> None:
+    print(f"RPC: {'plan endpoint' if os.environ.get('SOLANA_NODE_RPC_ENDPOINT') else 'public mainnet-beta'}", flush=True)
     with urllib.request.urlopen(CALLS, timeout=60) as r:  # noqa: S310
         rows = [json.loads(x) for x in r.read().decode().splitlines() if x.strip()]
     rows = sorted((c for c in rows if c["mc"] >= MIN_MC and c["mint"].endswith("pump")),
@@ -128,7 +142,9 @@ def main() -> None:
         sigs = sigs_around(curve_pda(c["mint"]), c["t"] - 30, c["t"] + 330)
         sigs.reverse()  # oldest first: the trades right at the call matter most
         print(f"  {c['sym'][:10]:10} {len(sigs)} curve txs in the window", flush=True)
-        path = sorted(t for s in sigs[:MAX_TXS] for t in trades(s, c["mint"]))
+        with ThreadPoolExecutor(WORKERS) as pool:
+            got = pool.map(lambda sg: trades(sg, c["mint"]), sigs[:MAX_TXS])
+            path = sorted(t for ts in got for t in ts)
         if len(path) < 5:
             continue
         used += 1
@@ -148,15 +164,10 @@ def main() -> None:
                 last = ex[-1]
                 got = sell_sol(last[1], last[2], tok) * (1 - LAG)
                 results.setdefault((d, h), []).append(got / SIZE_SOL - 1)
-        time.sleep(0.3)
-    print(f"\n{used} calls with curve trades around the call\n")
-    print("buy +Ds after call, sell Hs later: median / mean / win%")
-    for d in DELAYS:
-        cells = []
-        for h in HOLDS:
-            x = results.get((d, h), [])
-            cells.append(f"{h:>3}s {st.median(x):+5.0%}/{st.mean(x):+5.0%}/{sum(v > 0 for v in x) / len(x):3.0%}" if x else f"{h:>3}s -")
-        print(f"  D{d:<3} " + " | ".join(cells))
+        if used % 5 == 0:
+            table(results, used)
+    print(f"\n{used} calls with curve trades around the call")
+    table(results, used)
 
 
 if __name__ == "__main__":
