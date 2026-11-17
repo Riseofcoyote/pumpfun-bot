@@ -41,6 +41,8 @@ ENABLED = os.environ.get("FARMLIVE_ENABLED") == "1"
 SIZE_SOL = float(os.environ.get("FARMLIVE_SIZE_SOL", "0.1"))
 MAX_POSITIONS = int(os.environ.get("FARMLIVE_MAX_POSITIONS", "2"))
 SELFTEST_SOL = float(os.environ.get("FARMLIVE_SELFTEST_SOL", "0") or 0)
+# Shutdown: no new buys; sell every position the bot opened, then sit idle.
+EXIT_ONLY = os.environ.get("FARMLIVE_EXIT_ONLY") == "1"
 RESERVE_SOL = 0.02  # never spend the wallet below this (fees, token-account rent)
 EXIT_AGE_H = 15.0
 TRAIL = 0.20
@@ -426,6 +428,15 @@ class FarmLive:
         self.save()
 
     def step(self, now: float, last: dict) -> None:
+        if EXIT_ONLY:
+            for mint, pos in list(self.positions.items()):
+                if self.sell(pos, "shutdown (live trading turned off)"):
+                    self.positions.pop(mint)
+                self.save()
+            if not self.positions and not last.get("idle_logged"):
+                last["idle_logged"] = True
+                logger.warning("[shutdown] no open positions; live trading is off")
+            return
         if ENABLED and SELFTEST_SOL > 0 and not self.selftest_done:
             self.selftest()
             return

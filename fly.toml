@@ -25,6 +25,8 @@ primary_region = "ewr"
   FARMLIVE_SIZE_SOL = "0.1"
   FARMLIVE_MAX_POSITIONS = "2"
   FARMLIVE_SELFTEST_SOL = "0.01"
+  # Live trading turned off by Rock on Nov 17: sell open positions, buy nothing.
+  FARMLIVE_EXIT_ONLY = "1"
   VOLBOT_DATA_DIR = "/data/trades/volbot"
   PAPER_SIZE_SOL = "0.2"
 
