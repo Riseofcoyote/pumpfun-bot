@@ -34,7 +34,7 @@ from trending import feeds  # noqa: E402
 
 CALLS = "https://raw.githubusercontent.com/Smurfetc/solana-memecoin-calls-dataset/main/calls.jsonl"
 MIN_MC = float(sys.argv[1]) if len(sys.argv) > 1 else 20_000
-MAX_CALLS = int(sys.argv[2]) if len(sys.argv) > 2 else 400
+MAX_CALLS = int(sys.argv[2]) if len(sys.argv) > 2 else 250
 SIDE = 0.02  # pump.fun fee ~1% + slippage/priority on a fast-moving curve, per side
 DELAYS = (0, 1, 2, 3, 5, 10)
 HOLDS = (1, 2, 3, 5, 10, 15, 30)
@@ -125,6 +125,8 @@ def main() -> None:
         m = minutes(pool, c["t"])
         if 1 in m or 2 in m:
             data.append((c, m))
+        if len(data) % 25 == 0 and data:
+            print(f"  ...{len(data)} calls with candles so far", flush=True)
         time.sleep(0.1)
     print(f"{len(data)} calls with minute candles after the call")
     if len(data) < 30:
