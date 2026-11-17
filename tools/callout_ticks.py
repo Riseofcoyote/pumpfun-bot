@@ -26,7 +26,7 @@ import urllib.request
 
 CALLS = "https://raw.githubusercontent.com/Smurfetc/solana-memecoin-calls-dataset/main/calls.jsonl"
 RPC = "https://api.mainnet-beta.solana.com"
-PUMP = "6EF8rrecthR5Dzon8Nwu78hRvfCKubJ14M5uBEwF6P"
+PUMP = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
 TRADE_EVENT = bytes([189, 219, 127, 211, 78, 230, 97, 238])  # anchor event discriminator
 MIN_MC = float(sys.argv[1]) if len(sys.argv) > 1 else 20_000
 MAX_CALLS = int(sys.argv[2]) if len(sys.argv) > 2 else 40
