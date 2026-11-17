@@ -53,7 +53,10 @@ DATA = Path(os.environ.get("TRENDING_DATA_DIR", "trades/trending"))
 SIZE_SOL = float(os.environ.get("PAPER_SIZE_SOL", "0.2"))
 POP = int(os.environ.get("POPULATION", "48"))
 EVOLVE_H = float(os.environ.get("EVOLVE_HOURS", "3"))
-DISCOVER_S = 60  # GeckoTerminal refreshes about once a minute; 8 list calls each
+DISCOVER_S = 60  # GeckoTerminal refreshes about once a minute; 8 list calls + PUMPSWAP_PAGES each
+# PumpSwap top-volume pages added to discovery. The site-wide lists held about
+# four 4-12 h pools per snapshot, and after the relaunch block usually none.
+PUMPSWAP_PAGES = 2
 QUOTE_S = 5  # price checks on open positions
 MAX_OPEN = 3  # positions per strategy
 FEE_SIDE = 0.006  # DEX fee + priority/network fee, per side
@@ -1554,7 +1557,7 @@ def main() -> None:
                 eng.sol_usd = px
             next_sol = t + 600
         if t >= next_disc:
-            snap = feeds.discover()
+            snap = feeds.discover(PUMPSWAP_PAGES)
             if snap:
                 record_snapshot(snap, t)
                 eng.on_snapshot(snap, feeds.quotes)

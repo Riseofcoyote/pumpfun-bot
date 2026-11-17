@@ -155,10 +155,13 @@ def _parse_gt_pool(p: dict) -> dict | None:
 GT_HDR = {"Accept": "application/json;version=20230302"}
 
 
-def discover() -> dict[str, dict]:
+def discover(pumpswap_pages: int = 0) -> dict[str, dict]:
     """Snapshot of trending + top-volume Solana pools, keyed by pool address.
 
     Each record also carries ``ranks``: list name -> 1-based position.
+    ``pumpswap_pages`` adds that many pages of PumpSwap's own 24 h volume list
+    (rank key ``pumpvol``); each page is one more GeckoTerminal call, which
+    shares the per-IP limit with every tester on the machine.
     """
     lists = {
         "trend5m": f"{GT}/networks/solana/trending_pools?duration=5m&page=1",
@@ -170,6 +173,12 @@ def discover() -> dict[str, dict]:
         "volume_p2": f"{GT}/networks/solana/pools?sort=h24_volume_usd_desc&page=2",
         "volume_p3": f"{GT}/networks/solana/pools?sort=h24_volume_usd_desc&page=3",
     }
+    for page in range(1, pumpswap_pages + 1):
+        name = "pumpvol" if page == 1 else f"pumpvol_p{page}"
+        lists[name] = (
+            f"{GT}/networks/solana/dexes/pumpswap/pools"
+            f"?sort=h24_volume_usd_desc&page={page}"
+        )
     out: dict[str, dict] = {}
     for name, url in lists.items():
         doc = get_json(url, GT_GATE, GT_HDR)
@@ -183,9 +192,13 @@ def discover() -> dict[str, dict]:
                 continue
             cur = out.setdefault(rec["pool"], rec | {"ranks": {}})
             cur["ranks"].setdefault(key, offset + i + 1)
-    # A token can trend in several pools; keep its deepest pool only.
+    return _deepest_per_mint(out.values())
+
+
+def _deepest_per_mint(recs) -> dict[str, dict]:  # noqa: ANN001
+    """Keep each token's deepest pool, carrying over ranks from its other pools."""
     best: dict[str, dict] = {}
-    for rec in out.values():
+    for rec in recs:
         b = best.get(rec["mint"])
         if b is None or rec["liq"] > b["liq"]:
             if b is not None:
