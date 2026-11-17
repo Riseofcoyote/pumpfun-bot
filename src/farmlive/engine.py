@@ -432,6 +432,14 @@ class FarmLive:
             for mint, pos in list(self.positions.items()):
                 if self.sell(pos, "shutdown (live trading turned off)"):
                     self.positions.pop(mint)
+                else:
+                    pos["shutdown_tries"] = pos.get("shutdown_tries", 0) + 1
+                    if pos["shutdown_tries"] >= 5:
+                        logger.warning(f"[shutdown] {pos['symbol']} has no sell route (pool pulled); "
+                                       f"recording it as lost and stopping")
+                        self.log_trade({"action": "closed", "symbol": pos["symbol"], "mint": mint,
+                                        "note": "no sell route at shutdown; pool pulled"})
+                        self.positions.pop(mint)
                 self.save()
             if not self.positions and not last.get("idle_logged"):
                 last["idle_logged"] = True
