@@ -29,12 +29,13 @@ RPC = "https://api.mainnet-beta.solana.com"
 PUMP = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
 TRADE_EVENT = bytes([189, 219, 127, 211, 78, 230, 97, 238])  # anchor event discriminator
 MIN_MC = float(sys.argv[1]) if len(sys.argv) > 1 else 20_000
-MAX_CALLS = int(sys.argv[2]) if len(sys.argv) > 2 else 40
+MAX_CALLS = int(sys.argv[2]) if len(sys.argv) > 2 else 30
 FEE = 0.01
 LAG = 0.005
 SIZE_SOL = 0.1
 DELAYS = (0, 5, 10, 20, 30, 60)
 HOLDS = (10, 15, 20, 30, 60, 120, 300)
+MAX_PAGES = 6  # 6,000 signatures back from now; busier coins are skipped
 
 
 def rpc(method: str, params: list, tries: int = 6) -> dict | None:
@@ -63,7 +64,7 @@ def curve_pda(mint: str) -> str:
 def sigs_around(curve: str, t0: int, t1: int) -> list[str]:
     """Signatures on the curve with blockTime in [t0, t1], paging back from now."""
     out, before = [], None
-    for _ in range(30):
+    for _ in range(MAX_PAGES):
         opts = {"limit": 1000} | ({"before": before} if before else {})
         page = rpc("getSignaturesForAddress", [curve, opts]) or []
         if not page:
@@ -121,7 +122,8 @@ def main() -> None:
     used = 0
     for c in rows:
         sigs = sigs_around(curve_pda(c["mint"]), c["t"] - 60, c["t"] + 600)
-        path = sorted(t for s in sigs for t in trades(s, c["mint"]))
+        print(f"  {c['sym'][:10]:10} {len(sigs)} curve txs in the window", flush=True)
+        path = sorted(t for s in sigs[:400] for t in trades(s, c["mint"]))
         if len(path) < 5:
             continue
         used += 1

@@ -19,4 +19,4 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install -q solders
-      - run: python "tools/${{ inputs.script }}"
+      - run: python -u "tools/${{ inputs.script }}"
