@@ -31,6 +31,13 @@ from trending import feeds
 from trending.strategy import (
     FAMILIES,
     LOOSE,
+    MAX_ENTRY_BUY_RATIO,
+    MAX_ENTRY_H1,
+    MAX_ENTRY_H24,
+    MAX_ENTRY_M5,
+    MAX_POOL_AGE_H,
+    MIN_LIQ_USD,
+    MIN_POOL_AGE_H,
     RANGES,
     SEARCH_FAMILIES,
     crossover,
@@ -98,6 +105,39 @@ def is_calm(rec: dict) -> bool:
     """True when the pool's 1 h and 6 h moves are both inside the calm band."""
     pc = rec.get("pc") or {}
     return abs(pc.get("h1", 0.0)) < CALM_H1 and abs(pc.get("h6", 0.0)) < CALM_H6
+
+
+def gate_funnel(recs, relaunch: set[str]) -> dict[str, int]:  # noqa: ANN001
+    """Pools in one snapshot left after each hard entry gate, in order.
+
+    Tells "nothing qualifies" apart from "strategies too narrow" when no
+    position has opened for hours.
+    """
+    out = {"pools": 0, "age": 0, "liq": 0, "fresh_ticker": 0, "not_calm": 0, "caps": 0}
+    for r in recs:
+        out["pools"] += 1
+        if not MIN_POOL_AGE_H <= r["age_h"] <= MAX_POOL_AGE_H:
+            continue
+        out["age"] += 1
+        if r["liq"] < MIN_LIQ_USD:
+            continue
+        out["liq"] += 1
+        if r["mint"] in relaunch:
+            continue
+        out["fresh_ticker"] += 1
+        if is_calm(r):
+            continue
+        out["not_calm"] += 1
+        pc, tx = r["pc"], r["tx"]["m5"]
+        if (
+            pc["m5"] > MAX_ENTRY_M5
+            or pc["h24"] > MAX_ENTRY_H24
+            or pc["h1"] > MAX_ENTRY_H1
+            or tx["buys"] / max(tx["sells"], 1) > MAX_ENTRY_BUY_RATIO
+        ):
+            continue
+        out["caps"] += 1
+    return out
 
 
 def now_iso() -> str:
@@ -807,6 +847,7 @@ class Engine:
             if r["mint"] in relaunch and r["mint"] not in logged:
                 logger.info(f"[relaunch] skipping {r['symbol']} {r['mint']}")
         self._relaunch_logged = logged | relaunch
+        self.funnel = gate_funnel(snap.values(), relaunch)
         open_by_sid = Counter(p["sid"] for p in self.positions)
         held = {(p["sid"], p["mint"]) for p in self.positions}
         wanted: list[tuple[dict, dict]] = []
@@ -1532,7 +1573,8 @@ def main() -> None:
             eng.save()
             logger.info(
                 f"[status] gen {eng.generation} open {len(eng.positions)} "
-                f"closed {eng.totals['closed']} candidates {len(eng.candidates)}"
+                f"closed {eng.totals['closed']} candidates {len(eng.candidates)} "
+                f"funnel {getattr(eng, 'funnel', {})}"
             )
             next_save = t + 60
         time.sleep(0.5)
