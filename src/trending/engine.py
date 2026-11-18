@@ -97,9 +97,17 @@ DRAINED_HAIRCUT = 0.85
 RUG_SPIKE_TICKS = 3
 # Consecutive drained reads with the price halved before it counts as a rug.
 RUG_CRASH_TICKS = 3
-# A ticker seen on another mint within this window is a serial relaunch: PREDICT
+# A ticker seen on an OLDER mint within this window is a serial relaunch: PREDICT
 # and XTEN came back as a new mint each day, ground up 5%/hour, then dumped 70%.
+# Only the newer mint is blocked. Blocking every mint that shares a ticker also
+# blocked the originals of every copied ticker (GTAVI on 105 mints, JENSEN on 68):
+# by Nov 18, 681 of 1827 tickers were on 2+ mints and 10 of 11 tradable pools per
+# snapshot were skipped, so nothing opened for three days.
 RELAUNCH_WINDOW_H = 72
+# Another mint whose creation time is unknown (state from before creation times
+# were kept) counts as older when it was last seen before this pool was created
+# plus this margin: a dead farm mint drops off the lists around its relaunch.
+RELAUNCH_UNKNOWN_MARGIN_H = 1.0
 # Relaunched tickers stay tradable up to this pool age. 0 blocks them at any age:
 # farmlive's real buys of young relaunches (FLYDOG, AVATARS, BILL, ANTH twice)
 # all came back at 0-0.2% of cost within 15 h, and ANTH Azb3 had no Jupiter
@@ -889,6 +897,8 @@ class Engine:
         self.injected: list[str] = []
         # Ticker (upper case) -> {mint: last seen, epoch seconds}.
         self.symbol_mints: dict[str, dict[str, float]] = {}
+        # Mint -> creation of its oldest pool seen, epoch seconds.
+        self.mint_created: dict[str, float] = {}
 
     # ---------- population ----------
     def seed(self) -> None:
@@ -1008,18 +1018,37 @@ class Engine:
             sym = str(r.get("symbol", "")).upper()
             if sym and r.get("mint"):
                 self.symbol_mints.setdefault(sym, {})[r["mint"]] = now
+                if r.get("age_h") is not None:
+                    born = now - float(r["age_h"]) * 3600
+                    old = self.mint_created.get(r["mint"], born)
+                    self.mint_created[r["mint"]] = min(old, born)
         pruned = {}
         for sym, mints in self.symbol_mints.items():
             kept = {m: t for m, t in mints.items() if t >= cutoff}
             if kept:
                 pruned[sym] = kept
         self.symbol_mints = pruned
+        live = {m for mints in pruned.values() for m in mints}
+        self.mint_created = {m: t for m, t in self.mint_created.items() if m in live}
 
     def relaunched(self, rec: dict, now: float) -> bool:
-        """True when the ticker was seen on a different mint inside the window."""
+        """True when the ticker was on an older mint inside the window.
+
+        The oldest mint of a copied ticker is not a relaunch; every later one is.
+        """
         cutoff = now - RELAUNCH_WINDOW_H * 3600
         mints = self.symbol_mints.get(str(rec.get("symbol", "")).upper(), {})
-        return any(m != rec["mint"] and t >= cutoff for m, t in mints.items())
+        created = self.mint_created.get(rec["mint"], now - rec["age_h"] * 3600)
+        for m, seen in mints.items():
+            if m == rec["mint"] or seen < cutoff:
+                continue
+            other = self.mint_created.get(m)
+            if other is not None:
+                if other < created:
+                    return True
+            elif seen < created + RELAUNCH_UNKNOWN_MARGIN_H * 3600:
+                return True
+        return False
 
     def backfill_symbols(self, path: Path) -> None:
         """Seed the ticker history from the trade ledger after a restart."""
@@ -1461,6 +1490,7 @@ class Engine:
                 "version",
                 "injected",
                 "symbol_mints",
+                "mint_created",
             )
         }
         tmp = DATA / "state.json.tmp"
@@ -1493,6 +1523,7 @@ class Engine:
         now = time.time()
         self.cooldown = {k: v for k, v in self.cooldown.items() if v > now}
         self.symbol_mints = state.get("symbol_mints") or {}
+        self.mint_created = state.get("mint_created") or {}
         self.backfill_symbols(DATA / "trades.csv")
         self.backfill_tickers(DATA / "trades.csv")
         self.candidates = {
