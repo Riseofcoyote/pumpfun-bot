@@ -1,0 +1,35 @@
+# Read-only: prints the last matching lines of one paper tester's engine.log on
+# the Fly volume. Moves no funds, changes nothing.
+name: Fly log grep
+on:
+  workflow_dispatch:
+    inputs:
+      tester:
+        description: tester directory under /data/trades
+        default: trending
+      pattern:
+        description: fixed string to match (grep -F)
+        default: "[status]"
+      lines:
+        description: how many of the last matches to print
+        default: "40"
+permissions:
+  contents: read
+jobs:
+  grep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+      TESTER: ${{ inputs.tester }}
+      PATTERN: ${{ inputs.pattern }}
+      LINES: ${{ inputs.lines }}
+    steps:
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - name: Validate inputs
+        run: |
+          [[ "$TESTER" =~ ^[a-z0-9_]+$ ]] || { echo "bad tester"; exit 1; }
+          [[ "$LINES" =~ ^[0-9]+$ ]] || { echo "bad lines"; exit 1; }
+          [[ "$PATTERN" =~ ^[][A-Za-z0-9_\ .:=-]+$ ]] || { echo "bad pattern"; exit 1; }
+      - run: |
+          flyctl ssh console -a pumpfun-bot-w1afdq -C "sh -c 'grep -aF \"$PATTERN\" /data/trades/$TESTER/engine.log | tail -n $LINES | cut -c1-700'"
