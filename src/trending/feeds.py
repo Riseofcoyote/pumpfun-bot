@@ -75,8 +75,10 @@ GT_GATE = RateGate(25)  # free tier allows 30/min
 DS_GATE = RateGate(240)  # pairs endpoint allows 300/min
 
 
-def get_json(url: str, gate: RateGate, headers: dict | None = None) -> dict | None:
-    """GET a JSON document; ``None`` after 3 failed attempts."""
+def get_json(
+    url: str, gate: RateGate, headers: dict | None = None
+) -> dict | list | None:
+    """GET a JSON document (an object, or a list on some endpoints); ``None`` after 3 failed attempts."""
     hdrs = {"User-Agent": UA, "Accept": "application/json"}
     hdrs.update(headers or {})
     for attempt in range(3):
@@ -89,11 +91,13 @@ def get_json(url: str, gate: RateGate, headers: dict | None = None) -> dict | No
             if e.code == 429:
                 time.sleep(10 * (attempt + 1))
                 continue
-            logger.warning(f"HTTP {e.code} for {url.split('?')[0]}")
+            logger.warning(f"HTTP {e.code} for {url.split('?', maxsplit=1)[0]}")
             if e.code in (400, 404):
                 return None
         except (urllib.error.URLError, TimeoutError, ValueError, OSError) as e:
-            logger.warning(f"fetch failed ({type(e).__name__}) {url.split('?')[0]}")
+            logger.warning(
+                f"fetch failed ({type(e).__name__}) {url.split('?', maxsplit=1)[0]}"
+            )
         time.sleep(1 + attempt * 2)
     return None
 
@@ -155,13 +159,17 @@ def _parse_gt_pool(p: dict) -> dict | None:
 GT_HDR = {"Accept": "application/json;version=20230302"}
 
 
-def discover(pumpswap_pages: int = 0) -> dict[str, dict]:
+def discover(
+    pumpswap_pages: int = 0, grad_pools: list[str] | None = None
+) -> dict[str, dict]:
     """Snapshot of trending + top-volume Solana pools, keyed by pool address.
 
     Each record also carries ``ranks``: list name -> 1-based position.
     ``pumpswap_pages`` adds that many pages of PumpSwap's own 24 h volume list
     (rank key ``pumpvol``); each page is one more GeckoTerminal call, which
-    shares the per-IP limit with every tester on the machine.
+    shares the per-IP limit with every tester on the machine. ``grad_pools``
+    (pool addresses, at most 30 used) adds those pools under rank key ``grad``,
+    ranked by 24 h volume, in one more call.
     """
     lists = {
         "trend5m": f"{GT}/networks/solana/trending_pools?duration=5m&page=1",
@@ -192,7 +200,57 @@ def discover(pumpswap_pages: int = 0) -> dict[str, dict]:
                 continue
             cur = out.setdefault(rec["pool"], rec | {"ranks": {}})
             cur["ranks"].setdefault(key, offset + i + 1)
+    if grad_pools:
+        recs = gt_pools(grad_pools[:30])
+        ordered = sorted(recs.values(), key=lambda r: -r["vol"]["h24"])
+        for i, rec in enumerate(ordered):
+            cur = out.setdefault(rec["pool"], rec | {"ranks": {}})
+            cur["ranks"].setdefault("grad", i + 1)
     return _deepest_per_mint(out.values())
+
+
+def gt_pools(addrs: list[str]) -> dict[str, dict]:
+    """GeckoTerminal records for the given pool addresses, 30 per call."""
+    out: dict[str, dict] = {}
+    for i in range(0, len(addrs), 30):
+        chunk = ",".join(addrs[i : i + 30])
+        doc = get_json(f"{GT}/networks/solana/pools/multi/{chunk}", GT_GATE, GT_HDR)
+        for p in (doc or {}).get("data") or []:
+            rec = _parse_gt_pool(p)
+            if rec:
+                out[rec["pool"]] = rec
+    return out
+
+
+DS_TOKENS = "https://api.dexscreener.com/tokens/v1/solana"
+
+
+def pumpswap_pools_of(
+    mints: list[str], min_liq: float, min_age_h: float, max_age_h: float
+) -> list[str]:
+    """Deepest PumpSwap pool of each mint whose age and USD liquidity pass.
+
+    Ages are in hours from DexScreener's ``pairCreatedAt``. Returned deepest
+    first; mints DexScreener has no PumpSwap pair for are left out.
+    """
+    best: dict[str, tuple[float, str]] = {}
+    now_ms = time.time() * 1000
+    for i in range(0, len(mints), 30):
+        doc = get_json(f"{DS_TOKENS}/{','.join(mints[i : i + 30])}", DS_GATE)
+        pairs = doc if isinstance(doc, list) else (doc or {}).get("pairs") or []
+        for pr in pairs:
+            if not isinstance(pr, dict) or pr.get("dexId") != "pumpswap":
+                continue
+            mint = (pr.get("baseToken") or {}).get("address")
+            liq = _f((pr.get("liquidity") or {}).get("usd"))
+            created = _f(pr.get("pairCreatedAt"))
+            if not mint or not pr.get("pairAddress") or liq < min_liq or created <= 0:
+                continue
+            if not min_age_h <= (now_ms - created) / 3.6e6 <= max_age_h:
+                continue
+            if liq > best.get(mint, (0.0, ""))[0]:
+                best[mint] = (liq, pr["pairAddress"])
+    return [a for _, a in sorted(best.values(), reverse=True)]
 
 
 def _deepest_per_mint(recs) -> dict[str, dict]:  # noqa: ANN001

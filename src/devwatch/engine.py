@@ -241,6 +241,30 @@ def curve_sell_lamports(vt: int, vq: int, tokens: float) -> float:
     return out * (1 - CURVE_FEE) * (1 - LATENCY)
 
 
+# Every migration seen, for the trending tester's young-pool discovery
+# (trending.engine.GradSource). Trimmed to its newer half past GRAD_LOG_MAX bytes.
+GRAD_LOG = DATA / "graduates.csv"
+GRAD_LOG_MAX = 1_000_000
+
+
+def note_graduate(mint: str) -> None:
+    """Append one migration (epoch seconds, mint) to GRAD_LOG; never raises."""
+    if not mint:
+        return
+    try:
+        new = not GRAD_LOG.exists()
+        with GRAD_LOG.open("a") as f:
+            if new:
+                f.write("epoch,mint\n")
+            f.write(f"{time.time():.0f},{mint}\n")
+        if GRAD_LOG.stat().st_size > GRAD_LOG_MAX:
+            lines = GRAD_LOG.read_text().splitlines()
+            keep = lines[len(lines) // 2 :]
+            GRAD_LOG.write_text("\n".join(["epoch,mint", *keep]) + "\n")
+    except OSError as e:
+        logger.warning(f"[grad] log write failed: {e}")
+
+
 class Path_:
     """A tracked launch: stake value multiple over time and per-variant exits."""
 
@@ -837,6 +861,7 @@ class DevWatch:
                         if not isinstance(msg, dict):
                             continue
                         if msg.get("txType") in ("migrate", "migration"):
+                            note_graduate(str(msg.get("mint") or ""))
                             self.spawn(
                                 self.add_graduate(
                                     str(msg.get("mint") or ""),
