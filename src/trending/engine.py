@@ -108,6 +108,12 @@ RELAUNCH_WINDOW_H = 72
 # were kept) counts as older when it was last seen before this pool was created
 # plus this margin: a dead farm mint drops off the lists around its relaunch.
 RELAUNCH_UNKNOWN_MARGIN_H = 1.0
+# The older mint only counts when it was a real market: liquidity at or above
+# this while tracked, or a mint the tester traded. Most copies of a hot ticker
+# are thin pump.fun launches; counting them blocked 8 of 9 tradable pools per
+# snapshot even after the newer-mint rule (DCTY on 20 mints in 3 h, GTA6 on 91).
+# A mint seen before liquidity was kept counts only if it is in the ledger.
+RELAUNCH_PRIOR_LIQ_USD = 50_000.0
 # Relaunched tickers stay tradable up to this pool age. 0 blocks them at any age:
 # farmlive's real buys of young relaunches (FLYDOG, AVATARS, BILL, ANTH twice)
 # all came back at 0-0.2% of cost within 15 h, and ANTH Azb3 had no Jupiter
@@ -899,6 +905,10 @@ class Engine:
         self.symbol_mints: dict[str, dict[str, float]] = {}
         # Mint -> creation of its oldest pool seen, epoch seconds.
         self.mint_created: dict[str, float] = {}
+        # Mint -> highest pool liquidity seen, USD.
+        self.mint_liq: dict[str, float] = {}
+        # Mints with a paper trade in the ledger; rebuilt on load, not saved.
+        self.traded_mints: set[str] = set()
 
     # ---------- population ----------
     def seed(self) -> None:
@@ -1007,6 +1017,7 @@ class Engine:
                 }
             )
             self.totals["opened"] += 1
+            self.traded_mints.add(rec["mint"])
             logger.info(
                 f"[paper] OPEN {s['id']} {s['family']:13} {rec['symbol']:12} "
                 f"@ {fq['price']:.8g} liq ${liq:,.0f} cost/side {cost:.2%}"
@@ -1022,6 +1033,9 @@ class Engine:
                     born = now - float(r["age_h"]) * 3600
                     old = self.mint_created.get(r["mint"], born)
                     self.mint_created[r["mint"]] = min(old, born)
+                liq = float(r.get("liq") or 0.0)
+                if liq > self.mint_liq.get(r["mint"], 0.0):
+                    self.mint_liq[r["mint"]] = liq
         pruned = {}
         for sym, mints in self.symbol_mints.items():
             kept = {m: t for m, t in mints.items() if t >= cutoff}
@@ -1030,17 +1044,19 @@ class Engine:
         self.symbol_mints = pruned
         live = {m for mints in pruned.values() for m in mints}
         self.mint_created = {m: t for m, t in self.mint_created.items() if m in live}
+        self.mint_liq = {m: v for m, v in self.mint_liq.items() if m in live}
 
     def relaunched(self, rec: dict, now: float) -> bool:
-        """True when the ticker was on an older mint inside the window.
+        """True when the ticker was on an older, real mint inside the window.
 
-        The oldest mint of a copied ticker is not a relaunch; every later one is.
+        The oldest mint of a copied ticker is not a relaunch, and neither is a
+        mint whose only older namesakes were thin copies (see RELAUNCH_PRIOR_LIQ_USD).
         """
         cutoff = now - RELAUNCH_WINDOW_H * 3600
         mints = self.symbol_mints.get(str(rec.get("symbol", "")).upper(), {})
         created = self.mint_created.get(rec["mint"], now - rec["age_h"] * 3600)
         for m, seen in mints.items():
-            if m == rec["mint"] or seen < cutoff:
+            if m == rec["mint"] or seen < cutoff or not self.real_market(m):
                 continue
             other = self.mint_created.get(m)
             if other is not None:
@@ -1049,6 +1065,22 @@ class Engine:
             elif seen < created + RELAUNCH_UNKNOWN_MARGIN_H * 3600:
                 return True
         return False
+
+    def real_market(self, mint: str) -> bool:
+        """True for a mint that held RELAUNCH_PRIOR_LIQ_USD or was traded here."""
+        if mint in self.traded_mints:
+            return True
+        return self.mint_liq.get(mint, 0.0) >= RELAUNCH_PRIOR_LIQ_USD
+
+    def load_traded_mints(self, path: Path) -> None:
+        """Every mint in the trade ledger."""
+        try:
+            with path.open(newline="") as f:
+                self.traded_mints = {
+                    r["mint"] for r in csv.DictReader(f) if r.get("mint")
+                }
+        except (OSError, KeyError) as e:
+            logger.warning(f"traded-mint load failed: {e}")
 
     def backfill_symbols(self, path: Path) -> None:
         """Seed the ticker history from the trade ledger after a restart."""
@@ -1491,6 +1523,7 @@ class Engine:
                 "injected",
                 "symbol_mints",
                 "mint_created",
+                "mint_liq",
             )
         }
         tmp = DATA / "state.json.tmp"
@@ -1524,6 +1557,9 @@ class Engine:
         self.cooldown = {k: v for k, v in self.cooldown.items() if v > now}
         self.symbol_mints = state.get("symbol_mints") or {}
         self.mint_created = state.get("mint_created") or {}
+        self.mint_liq = state.get("mint_liq") or {}
+        self.traded_mints = set()
+        self.load_traded_mints(DATA / "trades.csv")
         self.backfill_symbols(DATA / "trades.csv")
         self.backfill_tickers(DATA / "trades.csv")
         self.candidates = {
