@@ -951,6 +951,16 @@ class Engine:
                 logger.info(f"[relaunch] skipping {r['symbol']} {r['mint']}")
         self._relaunch_logged = logged | relaunch
         self.funnel = gate_funnel(snap.values(), relaunch)
+        calm = [
+            f"{r['symbol']} h1 {r['pc'].get('h1', 0):+.1%} h6 {r['pc'].get('h6', 0):+.1%}"
+            for r in snap.values()
+            if MIN_POOL_AGE_H <= r["age_h"] <= MAX_POOL_AGE_H
+            and r["liq"] >= MIN_LIQ_USD
+            and r["mint"] not in relaunch
+            and is_calm(r)
+        ]
+        if calm:
+            logger.info(f"[calm] skipping {len(calm)}: {'; '.join(calm[:8])}")
         open_by_sid = Counter(p["sid"] for p in self.positions)
         held = {(p["sid"], p["mint"]) for p in self.positions}
         wanted: list[tuple[dict, dict]] = []
