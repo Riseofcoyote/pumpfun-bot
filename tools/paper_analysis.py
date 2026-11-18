@@ -102,6 +102,14 @@ def trending_part(rows: list[dict], label: str) -> None:
             ctx = json.loads(r.get("ctx") or "{}")
         except ValueError:
             ctx = {}
+        h1, h6 = ctx.get("h1"), ctx.get("h6")
+        if isinstance(h1, (int, float)) and isinstance(h6, (int, float)):
+            calm = abs(h1) < 0.03 and abs(h6) < 0.06  # trending engine CALM_H1/H6
+            by["calm"]["calm" if calm else "moving"].append(r["_ret"])
+            if calm:
+                by["calm_symbol"][r["symbol"]].append(r["_ret"])
+                by["calm_day"][r["_t"].strftime("%m-%d")].append(r["_ret"])
+                by["calm_reason"][r["reason"]].append(r["_ret"])
         for k, v in ctx.items():
             if isinstance(v, bool) or isinstance(v, str):
                 by[f"ctx.{k}"][v].append(r["_ret"])
@@ -113,14 +121,22 @@ def trending_part(rows: list[dict], label: str) -> None:
     table("by day", by["day"], 1, 40)
     table("by hour UTC", by["hour"], 1, 24)
     table("by symbol (n>=15), top", by["symbol"], 15, 12)
+    table("calm entry (|h1|<3% and |h6|<6%) vs moving", by["calm"])
+    table("calm entries by symbol", by["calm_symbol"], 1, 20)
+    table("calm entries by day", by["calm_day"], 1, 20)
+    table("calm entries by exit reason", by["calm_reason"])
     sym = by["symbol"]
-    worst = sorted(((k, v) for k, v in sym.items() if len(v) >= 15), key=lambda kv: sum(kv[1]))[:6]
+    worst = sorted(
+        ((k, v) for k, v in sym.items() if len(v) >= 15), key=lambda kv: sum(kv[1])
+    )[:6]
     print("-- worst symbols by total")
     for k, v in worst:
         print(f"  {k[:28]:28} {stats(v)}")
     for key in sorted(k for k in by if k.startswith("ctx.")):
         vals = by[key]
-        nums = [x for x in vals if isinstance(x, (int, float)) and not isinstance(x, bool)]
+        nums = [
+            x for x in vals if isinstance(x, (int, float)) and not isinstance(x, bool)
+        ]
         if len(nums) > 8:
             pairs = sorted((x, r) for x in nums for r in vals[x])
             q = len(pairs) // 4 or 1
