@@ -15,7 +15,8 @@ FAMILIES = ("momentum", "dip", "surge", "fresh_trend", "volume_leader")
 # engine version and on the average token, so it gets no new seeds or quota;
 # live members stay until evolution cuts them, and an elite one may still breed.
 SEARCH_FAMILIES = ("momentum", "dip", "surge", "volume_leader")
-SOURCES = ("any", "trend5m", "trend1h", "volume", "pumpvol")
+# "grad": pump.fun coins seen graduating 4-12 h ago (devwatch logs the migrations).
+SOURCES = ("any", "trend5m", "trend1h", "volume", "pumpvol", "grad")
 # Pools younger than this are fresh launches, not the established trending and
 # top-volume tokens this engine is for; no strategy may buy them. Returns in
 # 6-12 h pools fall steadily with age (6-8 h best), so 4-6 h is open to test.

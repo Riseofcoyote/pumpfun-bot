@@ -57,6 +57,15 @@ DISCOVER_S = 60  # GeckoTerminal refreshes about once a minute; 8 list calls + P
 # PumpSwap top-volume pages added to discovery. The site-wide lists held about
 # four 4-12 h pools per snapshot, and after the relaunch block usually none.
 PUMPSWAP_PAGES = 2
+# The site-wide lists still leave about one 4-12 h pool per snapshot once
+# relaunches are dropped, so pump.fun graduations are added as a source: devwatch
+# appends each migration to this file, and every GRAD_SCAN_S the ones that
+# graduated 4-12 h ago are looked up on DexScreener; up to 30 PumpSwap pools
+# with liquidity near the floor join each snapshot (one more GeckoTerminal call).
+GRAD_FILE = (
+    Path(os.environ.get("DEVWATCH_DATA_DIR", "trades/devwatch")) / "graduates.csv"
+)
+GRAD_SCAN_S = 300
 QUOTE_S = 5  # price checks on open positions
 MAX_OPEN = 3  # positions per strategy
 FEE_SIDE = 0.006  # DEX fee + priority/network fee, per side
@@ -141,6 +150,49 @@ def gate_funnel(recs, relaunch: set[str]) -> dict[str, int]:  # noqa: ANN001
             continue
         out["caps"] += 1
     return out
+
+
+class GradSource:
+    """PumpSwap pools of coins that graduated off pump.fun 4-12 h ago."""
+
+    def __init__(self, path: Path = GRAD_FILE) -> None:
+        self.path = path
+        self.pools: list[str] = []
+        self.next_scan = 0.0
+        self.mints_seen = 0
+
+    def recent_mints(self, now: float) -> list[str]:
+        """Mints whose graduation falls in the entry age band (with 0.5 h lead)."""
+        lo = now - MAX_POOL_AGE_H * 3600
+        hi = now - (MIN_POOL_AGE_H - 0.5) * 3600
+        mints: dict[str, None] = {}
+        try:
+            with self.path.open(newline="") as f:
+                for row in csv.DictReader(f):
+                    try:
+                        t = float(row.get("epoch") or 0)
+                    except ValueError:
+                        continue
+                    if lo <= t <= hi and row.get("mint"):
+                        mints[row["mint"]] = None
+        except OSError:
+            return []
+        return list(mints)
+
+    def refresh(self, now: float) -> list[str]:
+        """Pool list for the next snapshot; rescans at most every GRAD_SCAN_S."""
+        if now < self.next_scan:
+            return self.pools
+        self.next_scan = now + GRAD_SCAN_S
+        try:
+            mints = self.recent_mints(now)
+            self.mints_seen = len(mints)
+            self.pools = feeds.pumpswap_pools_of(
+                mints, 0.8 * MIN_LIQ_USD, MIN_POOL_AGE_H - 0.5, MAX_POOL_AGE_H
+            )[:30]
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[grad] scan failed: {type(e).__name__} {e}")
+        return self.pools
 
 
 def now_iso() -> str:
@@ -672,6 +724,33 @@ SEEDS_V8 = [
     for lo, hi, sl in ((4, 6, 0.45), (4, 6, 0.20), (4, 8, 0.45))
 ]
 
+# v9: outside relaunch tickers, entries into 4-11 h pools were the only age band
+# that paid (about 300 trades, +1% a trade, positive in both halves) while every
+# older band lost; since Nov 15 the lists held no such pool at all. These take the
+# leading calm-entry genome to pools of fresh pump.fun graduations (source
+# "grad"), plus one on any source so graduations listed elsewhere count too.
+_V9_BASE = _V5_BASE | {"min_age_h": 4, "max_age_h": 12, "pump_only": True}
+SEEDS_V9 = [
+    _V9_BASE
+    | {
+        "family": fam,
+        "source": src,
+        "max_rank": 30,
+        "tp": tp,
+        "sl": sl,
+        "use_trail": trail,
+        "trail_act": 0.12,
+        "trail_dist": 0.06,
+        "max_hold_min": hold,
+    }
+    for fam, src, tp, sl, trail, hold in (
+        ("momentum", "grad", 0.25, 0.45, False, 55),
+        ("momentum", "grad", 0.25, 0.20, False, 55),
+        ("momentum", "grad", 0.40, 0.30, True, 90),
+        ("momentum", "any", 0.25, 0.45, False, 55),
+    )
+]
+
 # Seed sets added to a running population once each, in this order.
 INJECTED_SEEDS = {
     "v3": SEEDS_V3,
@@ -680,6 +759,7 @@ INJECTED_SEEDS = {
     "v6": SEEDS_V6,
     "v7": SEEDS_V7,
     "v8": SEEDS_V8,
+    "v9": SEEDS_V9,
 }
 
 SEEDS = [
@@ -1548,6 +1628,7 @@ def main() -> None:
     signal.signal(signal.SIGTERM, lambda *_: stop.update(flag=True))
     signal.signal(signal.SIGINT, lambda *_: stop.update(flag=True))
 
+    grads = GradSource()
     next_disc = next_quote = next_save = next_sol = 0.0
     while not stop["flag"]:
         t = time.time()
@@ -1557,7 +1638,7 @@ def main() -> None:
                 eng.sol_usd = px
             next_sol = t + 600
         if t >= next_disc:
-            snap = feeds.discover(PUMPSWAP_PAGES)
+            snap = feeds.discover(PUMPSWAP_PAGES, grads.refresh(t))
             if snap:
                 record_snapshot(snap, t)
                 eng.on_snapshot(snap, feeds.quotes)
@@ -1577,7 +1658,8 @@ def main() -> None:
             logger.info(
                 f"[status] gen {eng.generation} open {len(eng.positions)} "
                 f"closed {eng.totals['closed']} candidates {len(eng.candidates)} "
-                f"funnel {getattr(eng, 'funnel', {})}"
+                f"funnel {getattr(eng, 'funnel', {})} "
+                f"grads {grads.mints_seen} mints -> {len(grads.pools)} pools"
             )
             next_save = t + 60
         time.sleep(0.5)
