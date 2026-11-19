@@ -25,9 +25,11 @@ MIN_POOL_AGE_H = 4.0
 # and in both halves (about 1,500 trades, 560 distinct entries, 75 tickers),
 # while 6-12 h pools made money. No strategy may buy a pool older than this.
 MAX_POOL_AGE_H = 12.0
-# Hard entry limits no genome can relax. Pools under $50k liquidity and buys
-# into a 5-minute candle already up 10% lost after costs in every ledger so far.
-MIN_LIQ_USD = 50_000.0
+# Hard entry limits no genome can relax. Buys into a 5-minute candle already up
+# 10% lost after costs in every ledger so far. In 4-12 h pools every family lost
+# under $150k liquidity (about 110 distinct entries, 20 tickers, both halves of
+# Nov 3-19) and made money above it.
+MIN_LIQ_USD = 150_000.0
 MAX_ENTRY_M5 = 0.10
 # Entries into a pool already up more than 200% over 24 hours lost after costs in
 # every family, and held all but a handful of the rugs (farm tokens pulled at
@@ -42,7 +44,7 @@ MAX_ENTRY_BUY_RATIO = 1.2
 
 # name -> (low, high, kind). kind "f" float, "i" int, "log" float sampled in log space.
 RANGES: dict[str, tuple[float, float, str]] = {
-    "min_liq": (50_000, 500_000, "log"),
+    "min_liq": (MIN_LIQ_USD, 600_000, "log"),
     "max_mcap": (200_000, 200_000_000, "log"),
     "min_age_h": (MIN_POOL_AGE_H, MAX_POOL_AGE_H - 1, "f"),
     "max_age_h": (MIN_POOL_AGE_H + 1, MAX_POOL_AGE_H, "f"),
@@ -71,7 +73,7 @@ RANGES: dict[str, tuple[float, float, str]] = {
 }
 BOOLS = ("pump_only", "use_trail", "fade_exit")
 LOOSE = {
-    "min_liq": 50_000.0,
+    "min_liq": MIN_LIQ_USD,
     "min_t5_rank": 1.0,
     "max_mcap": 200_000_000.0,
     "min_age_h": MIN_POOL_AGE_H,
