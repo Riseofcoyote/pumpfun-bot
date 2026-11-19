@@ -961,6 +961,32 @@ class Engine:
         ]
         if calm:
             logger.info(f"[calm] skipping {len(calm)}: {'; '.join(calm[:8])}")
+        capped = []
+        for r in snap.values():
+            if not (
+                MIN_POOL_AGE_H <= r["age_h"] <= MAX_POOL_AGE_H
+                and r["liq"] >= MIN_LIQ_USD
+                and r["mint"] not in relaunch
+                and not is_calm(r)
+            ):
+                continue
+            pc, tx = r["pc"], r["tx"]["m5"]
+            why = [
+                f"{k} {v:+.0%}"
+                for k, v, cap in (
+                    ("m5", pc["m5"], MAX_ENTRY_M5),
+                    ("h1", pc["h1"], MAX_ENTRY_H1),
+                    ("h24", pc["h24"], MAX_ENTRY_H24),
+                )
+                if v > cap
+            ]
+            ratio = tx["buys"] / max(tx["sells"], 1)
+            if ratio > MAX_ENTRY_BUY_RATIO:
+                why.append(f"bs5 {ratio:.2f}")
+            if why:
+                capped.append(f"{r['symbol']} {r['age_h']:.1f}h {' '.join(why)}")
+        if capped:
+            logger.info(f"[caps] skipping {len(capped)}: {'; '.join(capped[:8])}")
         open_by_sid = Counter(p["sid"] for p in self.positions)
         held = {(p["sid"], p["mint"]) for p in self.positions}
         wanted: list[tuple[dict, dict]] = []
