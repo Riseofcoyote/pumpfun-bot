@@ -790,6 +790,10 @@ class DevWatch:
                     if src not in self.hubs:
                         self.hubs.add(src)
                         self.watch_version += 1
+                        # the transfers before the threshold were the same service
+                        self.linked = {
+                            k: v for k, v in self.linked.items() if v["via"] != src
+                        }
                         logger.warning(
                             f"[logs] {src[:8]} funds too many wallets; treated as a service"
                         )
@@ -833,7 +837,11 @@ class DevWatch:
         if creator in self.funders:
             return "funder_launch", {"via": creator}
         link = self.linked.get(creator)
-        if link and link["at"] > time.time() - LINK_DAYS * 86400:
+        if (
+            link
+            and link["via"] not in self.hubs
+            and link["at"] > time.time() - LINK_DAYS * 86400
+        ):
             via = link["via"]
             vc = self.creators.get(via, {})
             mcap = vc.get("best_mcap", 0)
