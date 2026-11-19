@@ -132,6 +132,40 @@ def trending_part(rows: list[dict], label: str) -> None:
     print("-- worst symbols by total")
     for k, v in worst:
         print(f"  {k[:28]:28} {stats(v)}")
+    ctx_tables(by)
+    young = [
+        r for r in trades if 4 <= (_ctx(r).get("age_h") or -1) <= 12
+    ]
+    if young:
+        yb = defaultdict(lambda: defaultdict(list))
+        for r in young:
+            yb["family"][r["family"]].append(r["_ret"])
+            yb["reason"][r["reason"]].append(r["_ret"])
+            yb["day"][r["_t"].strftime("%m-%d")].append(r["_ret"])
+            yb["symbol"][r["symbol"]].append(r["_ret"])
+            for k, v in _ctx(r).items():
+                if isinstance(v, (int, float)) and not isinstance(v, bool):
+                    yb[f"ctx.{k}"][v].append(r["_ret"])
+        print(f"\n=== YOUNG POOLS (ctx.age_h 4-12) {len(young)} trades")
+        print("  all", stats([r["_ret"] for r in young]))
+        print(f"  distinct symbols {len(yb['symbol'])}")
+        table("young by family", yb["family"])
+        table("young by exit reason", yb["reason"])
+        table("young by day", yb["day"], 1, 20)
+        table("young by symbol (n>=5)", yb["symbol"], 5, 15)
+        ctx_tables(yb)
+
+
+def _ctx(r: dict) -> dict:
+    try:
+        c = json.loads(r.get("ctx") or "{}")
+    except ValueError:
+        return {}
+    return c if isinstance(c, dict) else {}
+
+
+def ctx_tables(by: dict) -> None:
+    """Quartile tables for every numeric ctx.* group in ``by``."""
     for key in sorted(k for k in by if k.startswith("ctx.")):
         vals = by[key]
         nums = [
