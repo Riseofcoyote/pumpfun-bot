@@ -47,6 +47,17 @@ SIZE_SOL = float(os.environ.get("PAPER_SIZE_SOL", "0.2"))
 PUBLIC_RPC = "https://api.mainnet-beta.solana.com"
 PUBLIC_WSS = "wss://api.mainnet-beta.solana.com"
 PUMPPORTAL = "wss://pumpportal.fun/api/data"
+# When PumpPortal has sent nothing for this long, creates and migrations come
+# from logsSubscribe on the public WSS instead (PumpPortal refused connections
+# from Fly and from GitHub Actions alike from Nov 20 09:06 UTC).
+PP_STALE_S = 120
+# pump.fun's mint-authority PDA is an account of every create and create_v2, and
+# of nothing else, so mentioning it streams creates without the trade flood.
+PUMP_MINT_AUTHORITY = "TSLvdd1pWpHVjahSpsvCXUbgwsL3JAcvokwaKt1eokM"
+# The withdraw authority that signs pump.fun migrations to PumpSwap.
+PUMP_MIGRATION_AUTHORITY = "39azUYFWPz3VHgKCf3VChUwbpURdCHRxjWVowf5jUJjg"
+CREATE_EVENT = bytes([27, 114, 169, 77, 222, 235, 99, 118])
+TRADE_EVENT = bytes([189, 219, 127, 211, 78, 230, 97, 238])
 SOL_MINT = "So11111111111111111111111111111111111111112"
 DEFAULT_KEY = "11111111111111111111111111111111"
 
@@ -192,6 +203,74 @@ PUMP_PROGRAM = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
 
 def curve_address(mint: str) -> str:
     return find_pda([b"bonding-curve", b58decode(mint)], PUMP_PROGRAM)
+
+
+def decode_create_logs(logs: list[str]) -> dict | None:
+    """PumpPortal-shaped create message from a pump.fun create's logs, or None.
+
+    ``traderPublicKey`` is the CreateEvent's creator; ``solAmount`` is the dev
+    buy in the same transaction, 0 when there was none.
+    """
+    if not any(
+        lg.endswith(("Instruction: Create", "Instruction: CreateV2")) for lg in logs
+    ):
+        return None
+    if not any(lg.startswith(f"Program {PUMP_PROGRAM} invoke") for lg in logs):
+        return None
+    msg: dict | None = None
+    dev_buy = 0.0
+    for lg in logs:
+        if not lg.startswith("Program data: "):
+            continue
+        try:
+            raw = base64.b64decode(lg[len("Program data: ") :])
+        except ValueError:
+            continue
+        if raw[:8] == CREATE_EVENT and msg is None:
+            try:
+                off, strs = 8, []
+                for _ in range(3):
+                    n = int.from_bytes(raw[off : off + 4], "little")
+                    strs.append(raw[off + 4 : off + 4 + n].decode("utf-8", "replace"))
+                    off += 4 + n
+                keys = [
+                    b58encode(raw[off + 32 * i : off + 32 * (i + 1)]) for i in range(4)
+                ]
+            except (IndexError, ValueError):
+                continue
+            if len(raw) < off + 128:
+                continue
+            mint, curve, _user, creator = keys
+            msg = {
+                "txType": "create",
+                "pool": "pump",
+                "mint": mint,
+                "symbol": strs[1],
+                "bondingCurveKey": curve,
+                "traderPublicKey": creator,
+            }
+        elif raw[:8] == TRADE_EVENT and len(raw) >= 48:
+            dev_buy = max(dev_buy, int.from_bytes(raw[40:48], "little") / 1e9)
+    if msg is not None:
+        msg["solAmount"] = dev_buy
+    return msg
+
+
+def migrate_accounts(tx: dict | None) -> tuple[str, str] | None:
+    """(mint, PumpSwap pool) of the pump.fun migrate instruction in a parsed tx."""
+    if not tx or (tx.get("meta") or {}).get("err") is not None:
+        return None
+    ixs = list(
+        (tx.get("transaction") or {}).get("message", {}).get("instructions") or []
+    )
+    for g in (tx.get("meta") or {}).get("innerInstructions") or []:
+        ixs += g.get("instructions") or []
+    for ix in ixs:
+        acc = ix.get("accounts") or []
+        if ix.get("programId") == PUMP_PROGRAM and len(acc) >= 10:
+            if acc[1] == PUMP_MIGRATION_AUTHORITY:
+                return str(acc[2]), str(acc[9])
+    return None
 
 
 def is_pump_dex(rec: dict) -> bool:
@@ -459,6 +538,8 @@ class DevWatch:
         self.done: list[dict] = []
         self.stats = Counter()
         self.last_control = 0.0
+        self.pp_last = time.time()  # last PumpPortal message
+        self.recent_creates: dict[str, float] = {}  # mint -> epoch, both sources
         self.watch_version = 0
         self.sol_usd = 150.0
         self.started = now_iso()
@@ -868,13 +949,10 @@ class DevWatch:
                             continue
                         if not isinstance(msg, dict):
                             continue
+                        self.pp_last = time.time()
                         if msg.get("txType") in ("migrate", "migration"):
-                            note_graduate(str(msg.get("mint") or ""))
-                            self.spawn(
-                                self.add_graduate(
-                                    str(msg.get("mint") or ""),
-                                    str(msg.get("pool") or ""),
-                                )
+                            self.on_migrate(
+                                str(msg.get("mint") or ""), str(msg.get("pool") or "")
                             )
                             continue
                         if msg.get("txType") != "create":
@@ -882,48 +960,140 @@ class DevWatch:
                                 logger.info(f"[pumpportal] other: {str(raw)[:300]}")
                             self.stats["other_msgs"] += 1
                             continue
-                        if msg.get("pool", "pump") != "pump":
-                            continue
-                        self.stats["launches"] += 1
-                        creator = str(msg.get("traderPublicKey") or "")
-                        hit = self.classify(creator)
-                        meta = {
-                            "mint": msg.get("mint"),
-                            "symbol": str(msg.get("symbol", ""))[:16],
-                            "creator": creator,
-                            "curve": msg.get("bondingCurveKey"),
-                            "dev_buy_sol": msg.get("solAmount"),
-                        }
-                        if hit:
-                            kind, extra = hit
-                            now = time.time()
-                            prev = self.last_launch.get(creator)
-                            # Minutes since this creator's previous create, capped ones
-                            # included; blank when none was seen since start.
-                            extra["gap_min"] = (
-                                round((now - prev) / 60, 1) if prev else ""
-                            )
-                            if len(self.last_launch) > 50_000:
-                                self.last_launch.clear()
-                            self.last_launch[creator] = now
-                            key = (datetime.now(UTC).date().isoformat(), creator)
-                            self.creator_signals[key] += 1
-                            if self.creator_signals[key] > MAX_SIGNALS_PER_CREATOR_DAY:
-                                self.stats[f"capped_{kind}"] += 1
-                                continue
-                            if len(self.creator_signals) > 20_000:
-                                self.creator_signals.clear()
-                            self.stats[f"signal_{kind}"] += 1
-                            logger.warning(
-                                f"[signal] {kind} {meta['symbol']} {meta['mint']} by {creator[:8]} {extra}"
-                            )
-                            self.spawn(self.track(kind, meta | extra))
-                        elif time.time() - self.last_control >= CONTROL_EVERY:
-                            self.last_control = time.time()
-                            self.spawn(self.track("control", meta))
+                        self.on_create(msg)
             except Exception as e:  # noqa: BLE001
-                logger.warning(f"[pumpportal] {type(e).__name__} {e}; reconnecting")
+                self.stats["pp_errors"] += 1
+                if self.stats["pp_errors"] % 100 == 1:
+                    logger.warning(
+                        f"[pumpportal] {type(e).__name__} {e}; reconnecting "
+                        f"({self.stats['pp_errors']} errors so far)"
+                    )
             await asyncio.sleep(3)
+
+    def on_migrate(self, mint: str, pool: str) -> None:
+        if not mint or self.recent_creates.get("m:" + mint):
+            return
+        self.recent_creates["m:" + mint] = time.time()
+        note_graduate(mint)
+        self.spawn(self.add_graduate(mint, pool))
+
+    def on_create(self, msg: dict) -> None:
+        """Count one pump.fun create (PumpPortal-shaped) and track it if it signals."""
+        if msg.get("pool", "pump") != "pump":
+            return
+        mint = str(msg.get("mint") or "")
+        now = time.time()
+        if not mint or mint in self.recent_creates:
+            return
+        self.recent_creates[mint] = now
+        if len(self.recent_creates) > 20_000:
+            cut = now - 3600
+            self.recent_creates = {
+                k: t for k, t in self.recent_creates.items() if t >= cut
+            }
+        self.stats["launches"] += 1
+        creator = str(msg.get("traderPublicKey") or "")
+        hit = self.classify(creator)
+        meta = {
+            "mint": mint,
+            "symbol": str(msg.get("symbol", ""))[:16],
+            "creator": creator,
+            "curve": msg.get("bondingCurveKey"),
+            "dev_buy_sol": msg.get("solAmount"),
+        }
+        if hit:
+            kind, extra = hit
+            prev = self.last_launch.get(creator)
+            # Minutes since this creator's previous create, capped ones
+            # included; blank when none was seen since start.
+            extra["gap_min"] = round((now - prev) / 60, 1) if prev else ""
+            if len(self.last_launch) > 50_000:
+                self.last_launch.clear()
+            self.last_launch[creator] = now
+            key = (datetime.now(UTC).date().isoformat(), creator)
+            self.creator_signals[key] += 1
+            if self.creator_signals[key] > MAX_SIGNALS_PER_CREATOR_DAY:
+                self.stats[f"capped_{kind}"] += 1
+                return
+            if len(self.creator_signals) > 20_000:
+                self.creator_signals.clear()
+            self.stats[f"signal_{kind}"] += 1
+            logger.warning(
+                f"[signal] {kind} {meta['symbol']} {mint} by {creator[:8]} {extra}"
+            )
+            self.spawn(self.track(kind, meta | extra))
+        elif now - self.last_control >= CONTROL_EVERY:
+            self.last_control = now
+            self.spawn(self.track("control", meta))
+
+    async def chain_loop(self, websockets) -> None:  # noqa: ANN001
+        """Creates and migrations from the public WSS while PumpPortal is silent."""
+        backoff = 10
+        while True:
+            if time.time() - self.pp_last < PP_STALE_S:
+                await asyncio.sleep(15)
+                continue
+            try:
+                async with websockets.connect(
+                    PUBLIC_WSS, ping_interval=20, max_size=2**22
+                ) as ws:
+                    for i, addr in enumerate(
+                        (PUMP_MINT_AUTHORITY, PUMP_MIGRATION_AUTHORITY), start=1
+                    ):
+                        await ws.send(
+                            json.dumps(
+                                {
+                                    "jsonrpc": "2.0",
+                                    "id": i,
+                                    "method": "logsSubscribe",
+                                    "params": [
+                                        {"mentions": [addr]},
+                                        {"commitment": "confirmed"},
+                                    ],
+                                }
+                            )
+                        )
+                        await asyncio.sleep(SUB_GAP)
+                    logger.warning(
+                        "[chain] PumpPortal silent; reading creates on chain"
+                    )
+                    backoff = 10
+                    while time.time() - self.pp_last >= PP_STALE_S:
+                        try:
+                            raw = await asyncio.wait_for(ws.recv(), timeout=60)
+                        except TimeoutError:
+                            continue
+                        self.on_chain_msg(raw)
+                    logger.info("[chain] PumpPortal back; chain fallback off")
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"[chain] {type(e).__name__} {e}; retry in {backoff}s")
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 300)
+
+    def on_chain_msg(self, raw: str | bytes) -> None:
+        try:
+            doc = json.loads(raw)
+            val = doc["params"]["result"]["value"]
+        except (ValueError, KeyError, TypeError):
+            return
+        if val.get("err") is not None:
+            return
+        logs = val.get("logs") or []
+        if any(lg.endswith("Instruction: Migrate") for lg in logs):
+            self.stats["chain_migrates"] += 1
+            self.spawn(self.chain_migrate(str(val.get("signature") or "")))
+            return
+        msg = decode_create_logs(logs)
+        if msg:
+            self.stats["chain_creates"] += 1
+            self.on_create(msg)
+
+    async def chain_migrate(self, sig: str) -> None:
+        if not sig:
+            return
+        got = migrate_accounts(await self.rpc.tx(sig))
+        if got:
+            self.on_migrate(*got)
 
     async def track(self, kind: str, meta: dict) -> None:
         """Paper-buy one launch and follow its value for an hour."""
@@ -1230,7 +1400,8 @@ async def amain() -> None:
                 dw.save()
                 logger.info(
                     f"[status] launches {dw.stats['launches']} open {len(dw.open)} "
-                    f"results {len(dw.done)} links {len(dw.linked)}"
+                    f"results {len(dw.done)} links {len(dw.linked)} "
+                    f"chain {dw.stats['chain_creates']}/{dw.stats['chain_migrates']}"
                 )
             except Exception:
                 logger.exception("save failed")
@@ -1241,6 +1412,7 @@ async def amain() -> None:
         dw.logs_loop(websockets),
         dw.tx_worker(),
         dw.pumpportal_loop(websockets),
+        dw.chain_loop(websockets),
     )
 
 
