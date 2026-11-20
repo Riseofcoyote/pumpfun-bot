@@ -621,6 +621,9 @@ class Narrative:
                     built = now
                     logger.warning(f"[dip] universe {[(r['symbol'], r['tier']) for r in universe]}")
                 for r in universe:
+                    # Strict tier retired: only wide-tier coins (wide minus strict) still trade.
+                    if r["tier"] == "strict":
+                        continue
                     if r["mint"] in self.dip_open or now - self.dip_last.get(r["mint"], 0) < DIP_COOLDOWN:
                         continue
                     bars = await asyncio.to_thread(gt_ohlcv, r["pool"], "minute", 5, DIP_AVG_BARS + 1)
