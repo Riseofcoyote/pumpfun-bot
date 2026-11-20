@@ -103,6 +103,11 @@ RUG_CRASH_TICKS = 3
 # blocked the originals of every copied ticker (GTAVI on 105 mints, JENSEN on 68):
 # by Nov 18, 681 of 1827 tickers were on 2+ mints and 10 of 11 tradable pools per
 # snapshot were skipped, so nothing opened for three days.
+# The older mint's pool must also be born inside the window before this one: a
+# namesake from weeks earlier is a copied ticker, not a daily relaunch. Without
+# this, ANT (7.6 h, $1.5M liquidity) was blocked by a 31-day-old mint and GTA6
+# by an 84-day-old one, while the farm blockers (UODF, VTC, EXEN, UGOS, USEF)
+# were all 17-42 h older.
 RELAUNCH_WINDOW_H = 72
 # Another mint whose creation time is unknown (state from before creation times
 # were kept) counts as older when it was last seen before this pool was created
@@ -1105,7 +1110,7 @@ class Engine:
                 continue
             other = self.mint_created.get(m)
             if other is not None:
-                if other < created:
+                if created - RELAUNCH_WINDOW_H * 3600 < other < created:
                     return m
             elif seen < created + RELAUNCH_UNKNOWN_MARGIN_H * 3600:
                 return m
