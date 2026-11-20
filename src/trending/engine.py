@@ -951,6 +951,7 @@ class Engine:
                 logger.info(f"[relaunch] skipping {r['symbol']} {r['mint']}")
         self._relaunch_logged = logged | relaunch
         self.funnel = gate_funnel(snap.values(), relaunch)
+        self.log_relaunch_gate(snap.values(), relaunch, now)
         calm = [
             f"{r['symbol']} h1 {r['pc'].get('h1', 0):+.1%} h6 {r['pc'].get('h6', 0):+.1%}"
             for r in snap.values()
@@ -1088,6 +1089,14 @@ class Engine:
         The oldest mint of a copied ticker is not a relaunch, and neither is a
         mint whose only older namesakes were thin copies (see RELAUNCH_PRIOR_LIQ_USD).
         """
+        return self.relaunch_blocker(rec, now) is not None
+
+    def relaunch_blocker(self, rec: dict, now: float) -> str | None:
+        """The older real mint that makes ``rec`` a relaunch, or None.
+
+        Ages compare pool creation times (DexScreener pairCreatedAt), not mint
+        creation: a pump.fun coin's PumpSwap pool is born at graduation.
+        """
         cutoff = now - RELAUNCH_WINDOW_H * 3600
         mints = self.symbol_mints.get(str(rec.get("symbol", "")).upper(), {})
         created = self.mint_created.get(rec["mint"], now - rec["age_h"] * 3600)
@@ -1097,10 +1106,36 @@ class Engine:
             other = self.mint_created.get(m)
             if other is not None:
                 if other < created:
-                    return True
+                    return m
             elif seen < created + RELAUNCH_UNKNOWN_MARGIN_H * 3600:
-                return True
-        return False
+                return m
+        return None
+
+    def log_relaunch_gate(self, recs, relaunch: set[str], now: float) -> None:  # noqa: ANN001
+        """Log once per mint each pool past the age and liquidity gates that the
+        relaunch block skips, with the older mint that blocked it."""
+        logged = getattr(self, "_gate_logged", set())
+        for r in recs:
+            if r["mint"] not in relaunch or r["mint"] in logged:
+                continue
+            if not MIN_POOL_AGE_H <= r["age_h"] <= MAX_POOL_AGE_H:
+                continue
+            if r["liq"] < MIN_LIQ_USD:
+                continue
+            logged.add(r["mint"])
+            m = self.relaunch_blocker(r, now)
+            if m is None:
+                continue
+            born = self.mint_created.get(m)
+            seen = self.symbol_mints.get(str(r["symbol"]).upper(), {}).get(m, now)
+            logger.info(
+                f"[relaunch-gate] {r['symbol']} {r['mint']} pool {r['age_h']:.1f}h "
+                f"liq ${r['liq']:,.0f} {r.get('dex', '')} blocked by {m} "
+                f"pool {'?' if born is None else f'{(now - born) / 3600:.1f}h'} "
+                f"peak liq ${self.mint_liq.get(m, 0.0):,.0f} "
+                f"traded {m in self.traded_mints} seen {(now - seen) / 3600:.1f}h ago"
+            )
+        self._gate_logged = logged
 
     def real_market(self, mint: str) -> bool:
         """True for a mint that held RELAUNCH_PRIOR_LIQ_USD or was traded here."""
