@@ -54,8 +54,10 @@ PP_STALE_S = 120
 # pump.fun's mint-authority PDA is an account of every create and create_v2, and
 # of nothing else, so mentioning it streams creates without the trade flood.
 PUMP_MINT_AUTHORITY = "TSLvdd1pWpHVjahSpsvCXUbgwsL3JAcvokwaKt1eokM"
-# The withdraw authority that signs pump.fun migrations to PumpSwap.
+# The migration wrapper program every pump.fun graduation to PumpSwap goes
+# through; it logs a CreatePoolEvent naming the mint and the new pool.
 PUMP_MIGRATION_AUTHORITY = "39azUYFWPz3VHgKCf3VChUwbpURdCHRxjWVowf5jUJjg"
+CREATE_POOL_EVENT = bytes.fromhex("b1310cd2a076a774")
 CREATE_EVENT = bytes([27, 114, 169, 77, 222, 235, 99, 118])
 TRADE_EVENT = bytes([189, 219, 127, 211, 78, 230, 97, 238])
 SOL_MINT = "So11111111111111111111111111111111111111112"
@@ -256,6 +258,24 @@ def decode_create_logs(logs: list[str]) -> dict | None:
     return msg
 
 
+def decode_migrate_logs(logs: list[str]) -> tuple[str, str] | None:
+    """(mint, pool) from the migration wrapper's CreatePoolEvent, or None.
+
+    Layout: timestamp i64, index u16, creator, base mint, quote mint, two u8
+    decimals, seven u64 amounts, bump u8, then the pool.
+    """
+    for lg in logs:
+        if not lg.startswith("Program data: "):
+            continue
+        try:
+            raw = base64.b64decode(lg[len("Program data: ") :])
+        except ValueError:
+            continue
+        if raw[:8] == CREATE_POOL_EVENT and len(raw) >= 205:
+            return b58encode(raw[50:82]), b58encode(raw[173:205])
+    return None
+
+
 def migrate_accounts(tx: dict | None) -> tuple[str, str] | None:
     """(mint, PumpSwap pool) of the pump.fun migrate instruction in a parsed tx."""
     if not tx or (tx.get("meta") or {}).get("err") is not None:
@@ -268,8 +288,7 @@ def migrate_accounts(tx: dict | None) -> tuple[str, str] | None:
     for ix in ixs:
         acc = ix.get("accounts") or []
         if ix.get("programId") == PUMP_PROGRAM and len(acc) >= 10:
-            if acc[1] == PUMP_MIGRATION_AUTHORITY:
-                return str(acc[2]), str(acc[9])
+            return str(acc[2]), str(acc[9])
     return None
 
 
@@ -1079,7 +1098,13 @@ class DevWatch:
         if val.get("err") is not None:
             return
         logs = val.get("logs") or []
+        got = decode_migrate_logs(logs)
+        if got:
+            self.stats["chain_migrates"] += 1
+            self.on_migrate(*got)
+            return
         if any(lg.endswith("Instruction: Migrate") for lg in logs):
+            # truncated logs drop the event; read the accounts from the tx
             self.stats["chain_migrates"] += 1
             self.spawn(self.chain_migrate(str(val.get("signature") or "")))
             return
