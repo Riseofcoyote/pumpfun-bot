@@ -47,10 +47,10 @@ SIZE_SOL = float(os.environ.get("PAPER_SIZE_SOL", "0.2"))
 PUBLIC_RPC = "https://api.mainnet-beta.solana.com"
 PUBLIC_WSS = "wss://api.mainnet-beta.solana.com"
 PUMPPORTAL = "wss://pumpportal.fun/api/data"
-# When PumpPortal has sent nothing for this long, creates and migrations come
-# from logsSubscribe on the public WSS instead (PumpPortal refused connections
-# from Fly and from GitHub Actions alike from Nov 20 09:06 UTC).
-PP_STALE_S = 120
+# Creates and migrations are read from logsSubscribe on the public WSS as well as
+# from PumpPortal, deduplicated by mint. PumpPortal alone drops most of them: it
+# reconnects every few seconds from Fly, and while it is up it delivers about a
+# seventh of the creates the chain stream sees.
 # pump.fun's mint-authority PDA is an account of every create and create_v2, and
 # of nothing else, so mentioning it streams creates without the trade flood.
 PUMP_MINT_AUTHORITY = "TSLvdd1pWpHVjahSpsvCXUbgwsL3JAcvokwaKt1eokM"
@@ -979,7 +979,7 @@ class DevWatch:
                                 logger.info(f"[pumpportal] other: {str(raw)[:300]}")
                             self.stats["other_msgs"] += 1
                             continue
-                        self.on_create(msg)
+                        self.on_create(msg, "pp")
             except Exception as e:  # noqa: BLE001
                 self.stats["pp_errors"] += 1
                 if self.stats["pp_errors"] % 100 == 1:
@@ -996,8 +996,12 @@ class DevWatch:
         note_graduate(mint)
         self.spawn(self.add_graduate(mint, pool))
 
-    def on_create(self, msg: dict) -> None:
-        """Count one pump.fun create (PumpPortal-shaped) and track it if it signals."""
+    def on_create(self, msg: dict, source: str = "pp") -> None:
+        """Count one pump.fun create (PumpPortal-shaped) and track it if it signals.
+
+        ``source`` ("pp" or "chain") is credited in ``first_<source>`` only when
+        that feed delivered the mint first.
+        """
         if msg.get("pool", "pump") != "pump":
             return
         mint = str(msg.get("mint") or "")
@@ -1005,6 +1009,7 @@ class DevWatch:
         if not mint or mint in self.recent_creates:
             return
         self.recent_creates[mint] = now
+        self.stats[f"first_{source}"] += 1
         if len(self.recent_creates) > 20_000:
             cut = now - 3600
             self.recent_creates = {
@@ -1046,12 +1051,9 @@ class DevWatch:
             self.spawn(self.track("control", meta))
 
     async def chain_loop(self, websockets) -> None:  # noqa: ANN001
-        """Creates and migrations from the public WSS while PumpPortal is silent."""
+        """Creates and migrations from the public WSS, alongside PumpPortal."""
         backoff = 10
         while True:
-            if time.time() - self.pp_last < PP_STALE_S:
-                await asyncio.sleep(15)
-                continue
             try:
                 async with websockets.connect(
                     PUBLIC_WSS, ping_interval=20, max_size=2**22
@@ -1073,17 +1075,13 @@ class DevWatch:
                             )
                         )
                         await asyncio.sleep(SUB_GAP)
-                    logger.warning(
-                        "[chain] PumpPortal silent; reading creates on chain"
-                    )
+                    logger.info("[chain] reading creates and migrations on chain")
                     backoff = 10
-                    while time.time() - self.pp_last >= PP_STALE_S:
-                        try:
-                            raw = await asyncio.wait_for(ws.recv(), timeout=60)
-                        except TimeoutError:
-                            continue
+                    while True:
+                        # A healthy stream carries a create every few seconds, so a
+                        # silent minute means a dead socket: reconnect.
+                        raw = await asyncio.wait_for(ws.recv(), timeout=60)
                         self.on_chain_msg(raw)
-                    logger.info("[chain] PumpPortal back; chain fallback off")
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"[chain] {type(e).__name__} {e}; retry in {backoff}s")
                 await asyncio.sleep(backoff)
@@ -1111,7 +1109,7 @@ class DevWatch:
         msg = decode_create_logs(logs)
         if msg:
             self.stats["chain_creates"] += 1
-            self.on_create(msg)
+            self.on_create(msg, "chain")
 
     async def chain_migrate(self, sig: str) -> None:
         if not sig:
@@ -1426,7 +1424,8 @@ async def amain() -> None:
                 logger.info(
                     f"[status] launches {dw.stats['launches']} open {len(dw.open)} "
                     f"results {len(dw.done)} links {len(dw.linked)} "
-                    f"chain {dw.stats['chain_creates']}/{dw.stats['chain_migrates']}"
+                    f"chain {dw.stats['chain_creates']}/{dw.stats['chain_migrates']} "
+                    f"first pp/chain {dw.stats['first_pp']}/{dw.stats['first_chain']}"
                 )
             except Exception:
                 logger.exception("save failed")
