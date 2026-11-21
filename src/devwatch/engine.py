@@ -74,6 +74,7 @@ GRAD_SPIKE_READS = 3
 # printed 36-160x right after migration; the report treats them as suspect.
 QUOTE_FIX_UTC = "2026-11-09T12:40:00Z"
 ENTRY_DELAY = 2.0  # seconds from create to our simulated buy
+ENTRY_CONFIRM_S = 1.5  # second curve read before the fill; the dearer one is used
 TRACK_SECONDS = int(
     os.environ.get("DEVWATCH_TRACK_SECONDS", "3600")
 )  # shorter only in smoke tests
@@ -1140,6 +1141,17 @@ class DevWatch:
         ):
             self.stats["unfillable"] += 1
             return
+        # The public RPC load-balances across nodes that lag each other, so one
+        # read can predate buys already landed (bundled dev buys). Fill at the
+        # dearer of two reads; a single stale read gave hour-long "frozen" 2-10x
+        # paths on curves nobody traded again.
+        await asyncio.sleep(ENTRY_CONFIRM_S)
+        data = await self.rpc.account(curve_addr)
+        again = decode_curve(data) if data else None
+        if again and not again["complete"] and again["vt"] > 0:
+            if again["vq"] * cur["vt"] > cur["vq"] * again["vt"]:
+                self.stats["entry_repriced"] += 1
+                cur = again
         stake = SIZE_SOL * 1e9
         tokens = curve_buy_tokens(cur["vt"], cur["vq"], stake)
         if tokens <= 0:
@@ -1242,7 +1254,18 @@ class DevWatch:
         if r.get("end") in ("unpriced", "lost"):
             return True
         if r.get("end"):
-            return False
+            # An ungraduated curve worth over 1.5x the stake at minute 5 and the
+            # same value at 15 and 60 had no trade for 55 minutes: the fill came
+            # off a stale read that predated the buys (see ENTRY_CONFIRM_S).
+            try:
+                m5, m15, m60 = (float(r[f"mult_m{m}"]) for m in (5, 15, 60))
+            except (KeyError, TypeError, ValueError):
+                return False
+            return (
+                r.get("graduated") not in ("True", True)
+                and m5 > 1.5
+                and m5 == m15 == m60
+            )
         if (
             r.get("graduated") in ("True", True)
             and r.get("time_utc", "") < QUOTE_FIX_UTC
