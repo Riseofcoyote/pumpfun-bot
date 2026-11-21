@@ -83,6 +83,11 @@ REFRESH_HOURS = 2
 TOP_PAGES = 10  # 20 pools per page (GeckoTerminal maximum)
 MIN_TOP_MCAP = 150_000
 MAX_CREATORS = 150
+# Of those, slots kept for creators of coins seen graduating live, newest first.
+# Ranking every creator by all-time mcap filled all 150 with $1M+ creators from
+# early November by Nov 13; from then on no graduate creator was followed and
+# both new-wallet signal types stopped (90 results before, none after).
+GRAD_CREATOR_SLOTS = 60
 MAX_FUNDERS = 100
 LINK_DAYS = 7
 MIN_LINK_SOL = 0.05
@@ -614,16 +619,21 @@ class DevWatch:
     def watched(self) -> dict[str, str]:
         """Wallets to follow on chain -> 'creator' or 'funder'.
 
-        Top-coin creators come first by mcap; graduate creators (mcap 0) fill the
-        remaining slots, newest first.
+        Top-coin creators whose coin reached the top lists most recently, then up
+        to GRAD_CREATOR_SLOTS graduate creators, newest first; a graduate slot left
+        empty goes to another top creator.
         """
-        cs = sorted(
-            (c for c in self.creators if c not in self.hubs),
-            key=lambda c: (
-                -self.creators[c]["best_mcap"],
-                -self.creators[c].get("added", 0),
-            ),
-        )[:MAX_CREATORS]
+        live = [c for c in self.creators if c not in self.hubs]
+        grads = sorted(
+            (c for c in live if self.creators[c].get("src") == "grad"),
+            key=lambda c: -self.creators[c].get("added", 0),
+        )[:GRAD_CREATOR_SLOTS]
+        tops = sorted(
+            (c for c in live if self.creators[c].get("src") != "grad"),
+            key=lambda c: (self.last_top_seen(c), self.creators[c]["best_mcap"]),
+            reverse=True,
+        )
+        cs = tops[: MAX_CREATORS - len(grads)] + grads
         fs = sorted(
             (f for f in self.funders if f not in self.hubs),
             key=lambda f: -len(self.funders[f]["creators"]),
@@ -631,6 +641,16 @@ class DevWatch:
         out = dict.fromkeys(fs, "funder")
         out.update(dict.fromkeys(cs, "creator"))
         return out
+
+    def last_top_seen(self, creator: str) -> str:
+        """ISO time this creator's newest known coin was first seen; '' if none."""
+        return max(
+            (
+                self.coins.get(m, {}).get("seen", "")
+                for m in self.creators[creator]["coins"]
+            ),
+            default="",
+        )
 
     async def refresh_watchlist(self) -> None:
         pools: list[dict] = []
