@@ -35,12 +35,14 @@ import csv
 import json
 import logging
 import logging.handlers
+import math
 import os
 import random
 import statistics
 import struct
 import sys
 import time
+from array import array
 from collections import Counter, defaultdict, deque
 from datetime import UTC, datetime
 from pathlib import Path
@@ -238,7 +240,7 @@ class VolBot:
         self.pending_unsub: deque[int] = deque()
         self.sub_queue: deque[Coin] = deque()
         self.open: list[Pos] = []
-        self.done: list[Result] = []
+        self.done = Results()
         self.stats: Counter = Counter()
         self.last_admit = 0.0
         self.req_id = 1000
@@ -252,7 +254,7 @@ class VolBot:
             with f.open() as fh:
                 for r in csv.DictReader(fh):
                     try:
-                        self.done.append(Result(r))
+                        self.done.append(r)
                     except (KeyError, TypeError, ValueError):
                         self.stats["bad_result_rows"] += 1
 
@@ -283,7 +285,7 @@ class VolBot:
             why, net, _ = p.exits[name]
             row[f"{name}_net"] = round(net, 4)
             row[f"{name}_why"] = why
-        self.done.append(Result(row))
+        self.done.append(row)
         f = DATA / "results.csv"
         new = not f.exists()
         with f.open("a", newline="") as fh:
@@ -553,35 +555,34 @@ class VolBot:
             + "".join(f"{r:>17}" for r in RULES)
             + f"{'peak>1.2':>9}{'m60 med':>8}",
         ]
-        by = defaultdict(list)
-        for r in rows:
-            by[r.kind].append(r)
+        by = rows.by_kind()
         for kind in KINDS:
-            rs = by.get(kind)
-            if not rs:
+            idx = by.get(kind)
+            if not idx:
                 continue
             cells = []
-            for i, _name in enumerate(RULES):
-                nets = [r.nets[i] for r in rs]
+            for col in rows.nets:
+                nets = [col[i] for i in idx]
                 cells.append(
                     f"{statistics.mean(nets) * 100:+5.1f}/{statistics.median(nets) * 100:+5.1f}/"
                     f"{sum(n > 0 for n in nets) / len(nets):3.0%}"
                 )
-            peaks = sum(r.peak >= 1.2 for r in rs) / len(rs)
-            m60 = [r.m60 for r in rs if r.m60 is not None]
+            peaks = sum(rows.peak[i] >= 1.2 for i in idx) / len(idx)
+            m60 = [rows.m60[i] for i in idx if not math.isnan(rows.m60[i])]
             lines.append(
-                f" {kind:17}{len(rs):>5}{len({r.mint for r in rs}):>6}  "
+                f" {kind:17}{len(idx):>5}{len({rows.mint[i] for i in idx}):>6}  "
                 + "".join(f"{c:>17}" for c in cells)
                 + f"{peaks:>9.0%}{(statistics.median(m60) - 1) * 100 if m60 else 0:>+7.1f}%"
             )
         lines += ["", "penny_pair by coin age (quick exit mean / n):"]
+        quick = rows.nets[QUICK]
         for lo, hi in ((0, 60), (60, 180), (180, 600), (600, 99999)):
             for kind in ("penny_pair", "control"):
-                rs = [r for r in by.get(kind, []) if lo <= r.age < hi]
-                if rs:
-                    m = statistics.mean(r.nets[QUICK] for r in rs)
+                sel = [i for i in by.get(kind, []) if lo <= rows.age[i] < hi]
+                if sel:
+                    m = statistics.mean(quick[i] for i in sel)
                     lines.append(
-                        f"  age {lo:>4}-{hi:<5}s {kind:11} {m * 100:+6.1f}%  n {len(rs)}"
+                        f"  age {lo:>4}-{hi:<5}s {kind:11} {m * 100:+6.1f}%  n {len(sel)}"
                     )
         lines.append(
             "(compare every pattern with control: only a gap over control is an edge)"
@@ -589,25 +590,51 @@ class VolBot:
         return "\n".join(lines)
 
 
-class Result:
-    """The fields ``report`` reads from one result row.
+class Results:
+    """The fields ``report`` reads from every result row, stored as float columns.
 
-    Every result is held in memory for the report; full CSV rows as dicts grew the
-    process past 150 MB and got the shared 512 MB machine OOM-killed every few
-    hours. ``nets`` follows ``RULES``; ``m60`` is ``None`` when the position closed
+    Every result stays in memory for the report. One slotted object per row still
+    cost about 400 bytes, 65 MB at 160k rows, and the shared 512 MB machine kept
+    restarting with under 30 MB free; columns cost about 70 bytes a row. ``nets``
+    has one column per rule in ``RULES``; a NaN ``m60`` means the position closed
     before 60 s.
     """
 
-    __slots__ = ("age", "kind", "m60", "mint", "nets", "peak")
+    def __init__(self) -> None:
+        self.kind = array("B")
+        self.mint = array("I")
+        self.age = array("d")
+        self.peak = array("d")
+        self.m60 = array("d")
+        self.nets = [array("d") for _ in RULES]
+        self.mint_ids: dict[str, int] = {}
 
-    def __init__(self, row: dict) -> None:
-        self.kind = sys.intern(row["kind"])
-        self.mint = sys.intern(row["mint"])
-        self.age = float(row["coin_age_s"])
-        self.peak = float(row["peak_mult"])
+    def __len__(self) -> int:
+        return len(self.kind)
+
+    def append(self, row: dict) -> None:
+        """Add one CSV row; raises KeyError, TypeError or ValueError on a bad row."""
+        kind = KINDS.index(row["kind"])
+        age = float(row["coin_age_s"])
+        peak = float(row["peak_mult"])
         m60 = row.get("m60")
-        self.m60 = float(m60) if m60 not in ("", None) else None
-        self.nets = tuple(float(row[f"{n}_net"]) for n in RULES)
+        m60f = float(m60) if m60 not in ("", None) else math.nan
+        nets = [float(row[f"{n}_net"]) for n in RULES]
+        mid = self.mint_ids.setdefault(row["mint"], len(self.mint_ids))
+        self.kind.append(kind)
+        self.mint.append(mid)
+        self.age.append(age)
+        self.peak.append(peak)
+        self.m60.append(m60f)
+        for col, v in zip(self.nets, nets, strict=True):
+            col.append(v)
+
+    def by_kind(self) -> dict[str, list[int]]:
+        """Row indices per kind name."""
+        out: dict[str, list[int]] = defaultdict(list)
+        for i, k in enumerate(self.kind):
+            out[KINDS[k]].append(i)
+        return out
 
 
 def _r(x: float | None) -> str:
