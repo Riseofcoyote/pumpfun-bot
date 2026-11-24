@@ -36,6 +36,8 @@ from trending import feeds  # noqa: E402
 
 DAYS = float(os.environ.get("BT_DAYS", "14"))
 N_POOLS = int(os.environ.get("BT_POOLS", "40"))
+# Candle size: "minute:5" (default), "minute:15", "hour:1". Bar counts in the grids scale with it.
+TF, AGG = os.environ.get("BT_TF", "minute:5").split(":")
 SIDE_COST = {"pumpswap": 0.005, "raydium": 0.004, "raydium-clmm": 0.004, "orca": 0.004,
              "meteora": 0.006, "meteora-damm-v2": 0.006}
 LATENCY = 0.001
@@ -73,7 +75,7 @@ def candles(pool: str, days: float) -> list[tuple]:
     stop = before - days * 86400
     for _ in range(12):
         doc = feeds.get_json(
-            f"{feeds.GT}/networks/solana/pools/{pool}/ohlcv/minute?aggregate=5&limit=1000"
+            f"{feeds.GT}/networks/solana/pools/{pool}/ohlcv/{TF}?aggregate={AGG}&limit=1000"
             f"&currency=usd&before_timestamp={before}", feeds.GT_GATE)
         rows = (((doc or {}).get("data") or {}).get("attributes") or {}).get("ohlcv_list") or []
         if not rows:
@@ -248,14 +250,14 @@ def main() -> None:
     coins: list[Coin] = []
     for r in uni:
         c = candles(r["pool"], DAYS)
-        if len(c) < 600:
+        if len(c) < 400:
             print(f"  {r['symbol']}: only {len(c)} candles, skipped")
             continue
         rets = [c[i][4] / c[i - 1][4] - 1 for i in range(1, len(c))]
         sd = st.pstdev(rets)
         cost = SIDE_COST.get(r["dex"], 0.006) + LATENCY
-        print(f"  {r['symbol']:10} {len(c):5d} candles  5m sd {sd:.2%}  cost/side {cost:.2%}")
-        if sd < 0.003:
+        print(f"  {r['symbol']:10} {len(c):5d} candles  bar sd {sd:.2%}  cost/side {cost:.2%}")
+        if sd < 0.003 and TF == "minute" and AGG == "5":
             print("    too calm to cover costs, skipped")
             continue
         coins.append(Coin(r["symbol"], cost, c))
