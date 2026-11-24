@@ -133,7 +133,9 @@ CALM_H6 = 0.06
 # NOAF (4-6 h) read h24 +346031% and USPR +440000% for hours, so the h24 cap
 # skipped every graduate the grad source added. A window whose implied starting
 # market cap is below this is a birth artifact and takes the next shorter window.
-BIRTH_MIN_MCAP_USD = 5_000.0
+# Pump.fun graduates start near 400 SOL of market cap (about $29k at $72), so no
+# real move since graduation implies less; GOTF (4.5 h, h24 +92408%) implied $5.4k.
+BIRTH_MIN_MCAP_USD = 20_000.0
 
 logger = logging.getLogger("trending")
 
