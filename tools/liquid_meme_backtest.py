@@ -2,7 +2,7 @@
 
 Every pump.fun paper tester so far lost after costs on young coins, mostly to
 rugs and a 4-10% round trip. This asks whether the same short holds work on
-coins that cannot rug overnight: pools at least 7 days old with $500k+
+coins that cannot rug overnight: pools at least 7 days old with $300k+
 liquidity, where a 0.2 SOL round trip costs well under 1%.
 
 Five strategy families on 5-minute candles (signal at a bar's close, fill at
@@ -14,8 +14,9 @@ the next bar's open, stop checked before target inside a bar):
   breakout   close over the n-bar high on k x volume -> fixed target/stop (contrast)
 
 Parameters are picked on the first 60% of the window (all coins pooled) and
-scored on the last 40%. Costs per side: the dex's fee+slippage plus 0.1%
-latency, and a second pass with 0.2% more per side.
+scored on the last 40%. Three cost passes per side: none (is there
+any edge at all?), a flat 0.3% (pool fee plus network fee on a deep pool), and
+the dex's fee+slippage plus 0.1% latency.
 
 Run from the repo root: python -u tools/liquid_meme_backtest.py
 """
@@ -45,7 +46,7 @@ SKIP = {"SOL", "WSOL", "USDC", "USDT", "USD1", "PYUSD", "USDS", "JITOSOL", "MSOL
 def universe(n: int) -> list[dict]:
     pools = dict(feeds.discover())
     for sort in ("h24_volume_usd_desc", "h24_tx_count_desc"):
-        for page in range(1, 6):
+        for page in range(1, 11):
             doc = feeds.get_json(f"{feeds.GT}/networks/solana/pools?page={page}&sort={sort}",
                                  feeds.GT_GATE)
             for p in (doc or {}).get("data") or []:
@@ -54,7 +55,11 @@ def universe(n: int) -> list[dict]:
                     pools.setdefault(rec["pool"], rec)
     best: dict[str, dict] = {}
     for r in pools.values():
-        if r["age_h"] < 168 or r["liq"] < 500_000 or r["symbol"].upper() in SKIP:
+        if r["age_h"] < 168 or r["liq"] < 300_000 or r["symbol"].upper() in SKIP:
+            continue
+        if r["symbol"].endswith("x") and r["symbol"][:-1].isupper():  # tokenized stocks
+            continue
+        if r["symbol"].upper().startswith("USD"):
             continue
         prev = best.get(r["mint"])
         if prev is None or r["vol"]["h24"] > prev["vol"]["h24"]:
@@ -156,7 +161,7 @@ def walk(cn: Coin, i: int, tp: float | None, sl: float, hold: int,
 
 def trades(cn: Coin, fam: str, p: tuple, t0: float, t1: float, extra: float) -> list[tuple]:
     out = []
-    cost = cn.cost + extra
+    cost = cn.cost if extra is None else extra
     n = len(cn.cl)
     i = 200
     while i < n - 2:
@@ -260,8 +265,9 @@ def main() -> None:
     tr_h = (cut - t_lo) / 3600
     te_h = (t_hi - cut) / 3600
     print(f"\n{len(coins)} coins; train {tr_h:.0f} h, test {te_h:.0f} h (all coins together)")
-    for extra in (0.0, 0.002):
-        print(f"\n########## extra cost {extra:.1%} per side")
+    for extra in (0.0, 0.003, None):
+        label = "the dex's fee+slippage+latency" if extra is None else f"{extra:.1%}"
+        print(f"\n########## cost per side: {label}")
         for fam, grid in GRIDS.items():
             scored = []
             for p in grid:
