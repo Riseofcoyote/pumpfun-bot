@@ -128,8 +128,35 @@ RELAUNCH_YOUNG_H = 0.0
 # ~2% round trip; tokenized stocks, BTC/XMR wrappers and the like sit here.
 CALM_H1 = 0.03
 CALM_H6 = 0.06
+# On a pool younger than the window, GeckoTerminal's h6/h24 change runs from the
+# pool's first print, and on PumpSwap graduates that print is a dust trade:
+# NOAF (4-6 h) read h24 +346031% and USPR +440000% for hours, so the h24 cap
+# skipped every graduate the grad source added. A window whose implied starting
+# market cap is below this is a birth artifact and takes the next shorter window.
+BIRTH_MIN_MCAP_USD = 5_000.0
 
 logger = logging.getLogger("trending")
+
+
+def fix_birth_windows(rec: dict) -> bool:
+    """Replace h6/h24 changes that start at a young pool's first print.
+
+    Mutates rec["pc"] in place (h6 -> h1, then h24 -> the fixed h6) and sets
+    rec["pc_fixed"]; returns True when anything changed.
+    """
+    pc = rec.get("pc") or {}
+    mcap = rec.get("mcap") or 0.0
+    fixed = False
+    for w, shorter, hours in (("h6", "h1", 6), ("h24", "h6", 24)):
+        v = pc.get(w)
+        if v is None or rec.get("age_h", 9999.0) >= hours or mcap <= 0:
+            continue
+        if v <= -1 or mcap / (1 + v) < BIRTH_MIN_MCAP_USD:
+            pc[w] = pc.get(shorter, 0.0)
+            fixed = True
+    if fixed:
+        rec["pc_fixed"] = True
+    return fixed
 
 
 def is_calm(rec: dict) -> bool:
@@ -942,6 +969,15 @@ class Engine:
         """Find entries in a discovery snapshot and paper-fill them."""
         self.totals["snapshots"] += 1
         now = time.time()
+        seen = getattr(self, "_birth_logged", set())
+        fixed = [r for r in snap.values() if fix_birth_windows(r)]
+        new = [r for r in fixed if r["mint"] not in seen]
+        if new:
+            logger.info(
+                "[birth] h6/h24 from first print replaced: "
+                + ", ".join(f"{r['symbol']} {r['age_h']:.1f}h" for r in new[:8])
+            )
+        self._birth_logged = seen | {r["mint"] for r in new}
         self._note_symbols(snap.values(), now)
         # A relaunched ticker is skipped once it is past RELAUNCH_YOUNG_H. Paper
         # fills on young relaunches looked steady; real fills on them did not.
@@ -1055,6 +1091,7 @@ class Engine:
                         "age_h": round(rec["age_h"], 1),
                         "ranks": rec["ranks"],
                         "dex": rec["dex"],
+                        "pcfix": bool(rec.get("pc_fixed")),
                     },
                 }
             )
