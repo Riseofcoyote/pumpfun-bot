@@ -184,6 +184,31 @@ def ctx_tables(by: dict) -> None:
             table(key, vals, 10, 12)
 
 
+QUOTE_FIX_UTC = "2026-11-09T12:40:00Z"
+
+
+def suspect(r: dict) -> bool:
+    """Mirror of devwatch's ``suspect``: a value we could not have sold at.
+
+    Graduated paths before QUOTE_FIX_UTC were valued at Jupiter's mid price
+    (36-160x prints), and an ungraduated curve frozen above 1.5x from minute 5
+    to 60 was filled off a stale read. Keep in step with src/devwatch/engine.py;
+    the workflow runs without the bot's dependencies, so it cannot import it.
+    """
+    if r.get("end") in ("unpriced", "lost"):
+        return True
+    grad = r.get("graduated") in ("True", "true", "1")
+    if grad and r.get("time_utc", "") < QUOTE_FIX_UTC:
+        return True
+    try:
+        m5, m15, m60 = (float(r[f"mult_m{m}"]) for m in (5, 15, 60))
+    except (KeyError, TypeError, ValueError):
+        return False
+    if r.get("end"):
+        return not grad and m5 > 1.5 and m5 == m15 == m60
+    return not grad and m5 > 2 and m5 == m60
+
+
 def devwatch(path: str) -> None:
     try:
         rows = list(csv.DictReader(open(path, newline="")))
@@ -212,7 +237,8 @@ def devwatch(path: str) -> None:
             f"peak med {st.median(peaks) if peaks else 0:5.2f} p90 {p90:6.2f} "
             f"end {dict(ends)}"
         )
-    clean = lambda r: (r.get("end") or "ok") == "ok"  # noqa: E731
+    clean = lambda r: (r.get("end") or "ok") == "ok" and not suspect(r)  # noqa: E731
+    print(f"-- {sum(map(suspect, rows))} suspect rows dropped from the rule tables")
     for rule in rules:
         groups = {}
         for k, rs in kinds.items():
