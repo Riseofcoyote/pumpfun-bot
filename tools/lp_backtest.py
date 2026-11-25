@@ -217,6 +217,9 @@ FEE_TGT = (0.0, 0.05)
 HOLDS = (2, 6, 24, 48)
 RULES = list(itertools.product(STOPS, TRAILS, VDECAY, FEE_TGT, HOLDS))
 ENTRY_DELAY_H = (0.0, 1.0, 4.0)
+# Entry once the coin's market cap clears the tier where LPs earn 0.20% instead of 0.02%.
+MCAP_GATE_SOL = 420.0
+ENTRY_MODES = os.environ.get("LP_ENTRY", "mcap").split(",")
 
 
 def summ(x: list[float]) -> str:
@@ -285,13 +288,27 @@ def main() -> None:
           f"total fee {st.median(p.tot_fee[0] for p in pools):.2%}")
 
     cut = pools[int(len(pools) * 0.6)].t_grad
-    for delay in ENTRY_DELAY_H:
-        print(f"\n################ enter {delay:g} h after graduation")
+    modes = []
+    if "delay" in ENTRY_MODES:
+        modes += [(f"enter {d:g} h after graduation", "delay", d) for d in ENTRY_DELAY_H]
+    if "mcap" in ENTRY_MODES:
+        modes += [(f"enter once market cap >= {MCAP_GATE_SOL:.0f} SOL (LP fee 0.20%)", "mcap", 0.0),
+                  (f"enter once market cap >= {MCAP_GATE_SOL:.0f} SOL and last-hour volume >= 200 SOL",
+                   "mcap", 200.0)]
+    for label, kind, arg in modes:
+        print(f"\n################ {label}")
         starts = []
         for pl in pools:
-            i0 = next((i for i, t in enumerate(pl.t) if t >= pl.t_grad + delay * 3600), None)
+            if kind == "delay":
+                i0 = next((i for i, t in enumerate(pl.t) if t >= pl.t_grad + arg * 3600), None)
+            else:
+                i0 = next((i for i in range(1, len(pl.t))
+                           if pl.p[i] * SUPPLY >= MCAP_GATE_SOL and pl.vol1h[i] >= arg), None)
             if i0 is not None:
                 starts.append((pl, i0))
+        print(f"{len(starts)} pools qualify")
+        if len(starts) < 10:
+            continue
 
         def run(rule: tuple, size: float) -> tuple[list, list, list]:
             tr, te, why = [], [], []
