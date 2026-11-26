@@ -1,0 +1,44 @@
+# Copy-trade study, wider search part 2: every 3 hours for a week, record the top
+# trending Solana meme coins and their top traders (tools/copy_pick.py) as an
+# artifact, so wallets that keep showing up across snapshots can be scored later.
+# Read-only: public market data only, no secrets, no wallet, no Fly access.
+# Stops by itself after STOP_AFTER; delete this file to stop sooner.
+name: Trending snapshots
+on:
+  schedule:
+    - cron: "23 */3 * * *"
+  workflow_dispatch:
+permissions:
+  contents: read
+env:
+  STOP_AFTER: "2026-12-03T06:00:00Z"
+jobs:
+  snap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Stop after one week
+        id: gate
+        run: |
+          if [ "$(date -u +%s)" -gt "$(date -u -d "$STOP_AFTER" +%s)" ]; then echo "run=no" >> "$GITHUB_OUTPUT"; echo "past $STOP_AFTER, nothing to do"; else echo "run=yes" >> "$GITHUB_OUTPUT"; fi
+      - uses: actions/checkout@v4
+        if: steps.gate.outputs.run == 'yes'
+      - uses: actions/setup-python@v5
+        if: steps.gate.outputs.run == 'yes'
+        with:
+          python-version: "3.11"
+      - name: Snapshot
+        if: steps.gate.outputs.run == 'yes'
+        run: |
+          python -u tools/copy_pick.py | tee pick.log
+          sed -n '/=== CANDIDATES JSON/,/=== END/p' pick.log | sed '1d;$d' > snapshot.json
+          echo "taken_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" > meta.txt
+          wc -c snapshot.json
+      - uses: actions/upload-artifact@v4
+        if: steps.gate.outputs.run == 'yes'
+        with:
+          name: snap-${{ github.run_id }}
+          path: |
+            snapshot.json
+            meta.txt
+          retention-days: 30
