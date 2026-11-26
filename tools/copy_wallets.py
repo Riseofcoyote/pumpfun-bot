@@ -39,7 +39,8 @@ RPC = "https://api.mainnet-beta.solana.com"
 GT = "https://api.geckoterminal.com/api/v2/networks/solana"
 WSOL = "So11111111111111111111111111111111111111112"
 USD_MINTS = {"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"}
-TX_PER_WALLET = int(os.environ.get("TX_PER_WALLET", "250"))
+TX_PER_WALLET = int(os.environ.get("TX_PER_WALLET", "150"))
+DEADLINE_S = 100 * 60  # stop fetching before the 120-minute job limit
 STAKE = 0.2
 FIXED_SOL = 0.0008
 SLIP = 0.01
@@ -119,7 +120,7 @@ def wallet_history(wallet, solusd):
     sigs = []
     before = None
     while len(sigs) < TX_PER_WALLET:
-        p = {"limit": 1000}
+        p = {"limit": min(1000, TX_PER_WALLET + 50)}
         if before:
             p["before"] = before
         page = rpc("getSignaturesForAddress", [wallet, p]) or []
@@ -127,9 +128,12 @@ def wallet_history(wallet, solusd):
             break
         sigs += [s for s in page if not s.get("err")]
         before = page[-1]["signature"]
-        if len(page) < 1000:
+        if len(page) < p["limit"]:
             break
     sigs = sigs[:TX_PER_WALLET]
+    span = (sigs[0].get("blockTime", 0) - sigs[-1].get("blockTime", 0)) if sigs else 0
+    if len(sigs) >= TX_PER_WALLET and span < len(sigs) * 60:
+        return None, len(sigs), span  # over 60 tx an hour: a bot, no need to parse
     events = []
     for s in sigs:
         tx = rpc("getTransaction", [s["signature"], {"maxSupportedTransactionVersion": 0, "encoding": "json"}])
@@ -150,7 +154,6 @@ def wallet_history(wallet, solusd):
                 events.append({"t": t, "mint": m, "side": "in", "sol": 0, "tok": d})
             else:
                 events.append({"t": t, "mint": m, "side": "out", "sol": 0, "tok": -d})
-    span = (sigs[0].get("blockTime", 0) - sigs[-1].get("blockTime", 0)) if sigs else 0
     return sorted(events, key=lambda e: e["t"]), len(sigs), span
 
 
@@ -304,47 +307,53 @@ def fmt(xs):
     return f"n {len(xs):3} win {w:4.0%} mean {statistics.mean(xs):+7.1%} med {statistics.median(xs):+7.1%}"
 
 
+def report(s, sim=None):
+    hold = "-" if s["med_hold_s"] is None else f"{s['med_hold_s']:.0f}s"
+    line = (f"  {s['wallet']} coins {s['coins']:3} win {s['win_rate']:4.0%} pnl {s['pnl_sol']:+8.2f} SOL med {s['med_pct']:+6.0%} "
+            f"buy {s['med_buy_sol']:.2f} hold {hold:>6} swaps/h {s['swaps_per_h']:5} span {s['span_h']}h "
+            f"snipe {s['snipe_rate']:.0%} xfer {s['insider_rate']:.0%} top {s['top_share']:.0%} "
+            f"flags {','.join(s['flags']) or '-'} | {s['why']} | trending {','.join(s['trending_hit'])}")
+    print(line)
+    if sim:
+        print(f"     copy instant  {fmt(sim[0])}")
+        print(f"     copy delayed  {fmt(sim[1])}")
+    print("SCORE " + json.dumps(s))
+
+
 def main(shard, nshards):
+    start = time.time()
     here = os.path.dirname(os.path.abspath(__file__))
     cand = json.load(open(os.path.join(here, "data", "copy_candidates.json")))
     wallets = [w for i, w in enumerate(cand["wallets"]) if i % nshards == shard]
     trending = {c["mint"]: c["sym"] for c in cand["coins"]}
     solusd = sol_usd()
     print(f"shard {shard}/{nshards}: {len(wallets)} wallets, SOL ${solusd:.2f}, {TX_PER_WALLET} tx each")
-    hist = {}
     for j, w in enumerate(wallets):
+        if time.time() - start > DEADLINE_S:
+            print(f"deadline: skipped {len(wallets) - j} wallets: " + " ".join(x["wallet"] for x in wallets[j:]))
+            break
         t0 = time.time()
         ev, ntx, span = wallet_history(w["wallet"], solusd)
-        hist[w["wallet"]] = (ev, ntx, span)
-        print(f"  [{j + 1}/{len(wallets)}] {w['wallet']} {ntx} tx over {span / 3600:.1f} h, {len(ev)} swaps/transfers ({time.time() - t0:.0f}s)")
-    mints = {e["mint"] for ev, _, _ in hist.values() for e in ev}
-    prices = jup_prices(mints)
-    results = []
-    for w in wallets:
-        ev, ntx, span = hist[w["wallet"]]
+        print(f"  [{j + 1}/{len(wallets)}] {w['wallet']} {ntx} tx over {span / 3600:.1f} h, "
+              f"{'bot-rate, skipped' if ev is None else str(len(ev)) + ' swaps/transfers'} ({time.time() - t0:.0f}s)")
+        if ev is None:
+            s = {"wallet": w["wallet"], "tx": ntx, "span_h": round(span / 3600, 1), "swaps": None,
+                 "swaps_per_h": round(ntx / max(span / 3600, 0.01), 1), "coins": 0, "wins": 0, "win_rate": 0,
+                 "pnl_sol": 0, "med_pct": 0, "med_buy_sol": 0, "med_hold_s": None, "snipe_rate": 0,
+                 "insider_rate": 0, "top_share": 0, "coins_per_h": 0, "flags": ["bot"], "why": w["why"], "trending_hit": []}
+            report(s)
+            continue
+        prices = jup_prices({e["mint"] for e in ev})
         s, coins = score(w["wallet"], ev, ntx, span, prices, solusd)
         s["why"] = w["why"]
         s["trending_hit"] = sorted({trending[c["mint"]] for c in coins if c["mint"] in trending})
-        results.append((s, coins))
-    print("\nWallet scores (coins = complete positions inside the window; pnl marks unsold tokens now):")
-    for s, _ in sorted(results, key=lambda x: -x[0]["pnl_sol"]):
-        hold = "-" if s["med_hold_s"] is None else f"{s['med_hold_s']:.0f}s"
-        print(f"  {s['wallet']} coins {s['coins']:3} win {s['win_rate']:4.0%} pnl {s['pnl_sol']:+8.2f} SOL med {s['med_pct']:+6.0%} "
-              f"buy {s['med_buy_sol']:.2f} hold {hold:>6} swaps/h {s['swaps_per_h']:5} span {s['span_h']}h "
-              f"snipe {s['snipe_rate']:.0%} xfer {s['insider_rate']:.0%} top {s['top_share']:.0%} "
-              f"flags {','.join(s['flags']) or '-'} | {s['why']} | trending {','.join(s['trending_hit'])}")
-    keep = [(s, c) for s, c in results if not s["flags"] and s["win_rate"] >= 0.4 and s["pnl_sol"] > 0]
-    print(f"\n{len(keep)} wallets pass the filters (no flags, win rate >= 40%, profit > 0); paper-copying them")
-    pairs = best_pairs({c["mint"] for _, cs in keep for c in cs})
-    for s, coins in sorted(keep, key=lambda x: -x[0]["pnl_sol"]):
-        coins = sorted(coins, key=lambda c: c["first"])[-25:]
-        inst, dly = copy_sim(coins, pairs)
-        print(f"  {s['wallet']} ({s['coins']} coins, {s['coins_per_h']}/h, wallet win {s['win_rate']:.0%})")
-        print(f"     copy instant  {fmt(inst)}")
-        print(f"     copy delayed  {fmt(dly)}")
-    print("=== SCORES JSON")
-    print(json.dumps([s for s, _ in results]))
-    print("=== END")
+        sim = None
+        if not s["flags"] and s["win_rate"] >= 0.4 and s["pnl_sol"] > 0:
+            pairs = best_pairs({c["mint"] for c in coins})
+            sim = copy_sim(sorted(coins, key=lambda c: c["first"])[-25:], pairs)
+            s["copy_instant"], s["copy_delayed"] = sim
+        report(s, sim)
+    print("=== DONE")
 
 
 if __name__ == "__main__":
