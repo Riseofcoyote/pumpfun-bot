@@ -126,7 +126,7 @@ def run(name):
         s.update(info)
         ok = (not s["flags"] and s["win_rate"] >= 0.45 and s["pnl_sol"] > 0 and wk and sum(v > 0 for v in wk) * 2 >= len(wk))
         sim = None
-        if ok:
+        if ok or w.get("force_copy"):
             pairs = cw.best_pairs({c["mint"] for c in coins})
             sim = cw.copy_sim(sorted(coins, key=lambda c: c["first"])[-25:], pairs)
             s["copy_instant"], s["copy_delayed"] = sim
