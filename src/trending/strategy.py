@@ -35,6 +35,16 @@ MAX_ENTRY_M5 = 0.10
 # every family, and held all but a handful of the rugs (farm tokens pulled at
 # the top of their cycle).
 MAX_ENTRY_H24 = 2.0
+# That evidence is all from pools old enough for h24 to be a real 24 h window.
+# On a pool younger than 24 h, h24 runs from its first print, and every pump.fun
+# graduate that reaches the liquidity floor is up far more than 200% since then,
+# so the cap skipped every one (BASKET, UBR, UBI for hours on Nov 25-26) and no
+# position opened from Nov 19 to Nov 26. A genome with young_h24_free set skips
+# the cap, and its own h24_max, on pools younger than this; m5 and h1 still bound
+# how stretched the entry is. The ledger held no 4-12 h, $150k+ entry above +200%
+# when the gene was added, so these entries are untested: split them out by the
+# gene (or ctx age_h < 24 and h24 > 2) before trusting them.
+H24_CAP_MIN_AGE_H = 24.0
 # Entries into a pool already up more than 15% over the last hour lost about 9%
 # net (7% before costs) in every family and on every day, across 30 tokens.
 MAX_ENTRY_H1 = 0.15
@@ -71,7 +81,7 @@ RANGES: dict[str, tuple[float, float, str]] = {
     "max_hold_min": (20, 360, "log"),
     "cooldown_min": (5, 120, "log"),
 }
-BOOLS = ("pump_only", "use_trail", "fade_exit")
+BOOLS = ("pump_only", "use_trail", "fade_exit", "young_h24_free")
 LOOSE = {
     "min_liq": MIN_LIQ_USD,
     "min_t5_rank": 1.0,
@@ -185,6 +195,16 @@ def crossover(a: dict, b: dict, rng: random.Random) -> dict:
     return s
 
 
+def h24_capped(rec: dict, s: dict | None = None) -> bool:
+    """True when the h24 entry caps apply to ``rec`` for strategy ``s``.
+
+    With ``s`` None, answers for the most permissive genome (gene set).
+    """
+    if rec.get("age_h", 0.0) >= H24_CAP_MIN_AGE_H:
+        return True
+    return s is not None and not s.get("young_h24_free", False)
+
+
 def is_pump(rec: dict) -> bool:
     return rec["mint"].endswith("pump") or "pump" in rec["dex"]
 
@@ -209,7 +229,10 @@ def entry_signal(s: dict, rec: dict, prev_ranks: dict[str, int] | None) -> bool:
         if r is None or r > s["max_rank"]:
             return False
     pc, tx, vol = rec["pc"], rec["tx"]["m5"], rec["vol"]
-    if pc["m5"] > MAX_ENTRY_M5 or pc["h24"] > MAX_ENTRY_H24 or pc["h1"] > MAX_ENTRY_H1:
+    capped = h24_capped(rec, s)
+    if pc["m5"] > MAX_ENTRY_M5 or pc["h1"] > MAX_ENTRY_H1:
+        return False
+    if capped and pc["h24"] > MAX_ENTRY_H24:
         return False
     t5 = ranks.get("trend5m")
     if t5 is not None and t5 < s.get("min_t5_rank", 1.0):
@@ -221,7 +244,9 @@ def entry_signal(s: dict, rec: dict, prev_ranks: dict[str, int] | None) -> bool:
         return False
     if tx["buyers"] < s["min_m5_buyers"]:
         return False
-    if not s["h24_min"] <= pc["h24"] <= s.get("h24_max", MAX_ENTRY_H24):
+    if pc["h24"] < s["h24_min"]:
+        return False
+    if capped and pc["h24"] > s.get("h24_max", MAX_ENTRY_H24):
         return False
     if pc.get("h6", 0.0) < s.get("h6_min", -0.5):
         return False
@@ -307,4 +332,6 @@ def describe(s: dict) -> str:
         parts.append("fade-exit")
     if s["pump_only"]:
         parts.append("pump-only")
+    if s.get("young_h24_free"):
+        parts.append("no h24 cap <24h")
     return " | ".join(parts)

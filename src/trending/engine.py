@@ -29,6 +29,7 @@ from pathlib import Path
 
 from trending import feeds
 from trending.strategy import (
+    BOOLS,
     FAMILIES,
     LOOSE,
     MAX_ENTRY_BUY_RATIO,
@@ -44,6 +45,7 @@ from trending.strategy import (
     describe,
     entry_signal,
     exit_reason,
+    h24_capped,
     mutate,
     random_strategy,
     repair,
@@ -191,7 +193,7 @@ def gate_funnel(recs, relaunch: set[str]) -> dict[str, int]:  # noqa: ANN001
         pc, tx = r["pc"], r["tx"]["m5"]
         if (
             pc["m5"] > MAX_ENTRY_M5
-            or pc["h24"] > MAX_ENTRY_H24
+            or (h24_capped(r) and pc["h24"] > MAX_ENTRY_H24)
             or pc["h1"] > MAX_ENTRY_H1
             or tx["buys"] / max(tx["sells"], 1) > MAX_ENTRY_BUY_RATIO
         ):
@@ -799,6 +801,29 @@ SEEDS_V9 = [
     )
 ]
 
+# v10: from Nov 19 to Nov 26 nothing opened. The 4-12 h pools that cleared the
+# liquidity floor (BASKET, UBR, UBI) were all skipped by the 200% h24 cap, which
+# on a pool that young measures the rise since its first print. These copy the v9
+# graduate genomes and the leading 6-12 h volume_leader with young_h24_free set,
+# to test whether young graduates that have already run pay; the other genomes
+# keep the cap, so the two sets compare in the same market.
+SEEDS_V10 = [s | {"young_h24_free": True} for s in SEEDS_V9] + [
+    _V9_BASE
+    | {
+        "family": "volume_leader",
+        "source": "volume",
+        "max_rank": 25,
+        "min_age_h": 6,
+        "max_age_h": 12,
+        "tp": 0.25,
+        "sl": sl,
+        "use_trail": False,
+        "max_hold_min": 55,
+        "young_h24_free": True,
+    }
+    for sl in (0.45, 0.20)
+]
+
 # Seed sets added to a running population once each, in this order.
 INJECTED_SEEDS = {
     "v3": SEEDS_V3,
@@ -808,6 +833,7 @@ INJECTED_SEEDS = {
     "v7": SEEDS_V7,
     "v8": SEEDS_V8,
     "v9": SEEDS_V9,
+    "v10": SEEDS_V10,
 }
 
 SEEDS = [
@@ -1020,7 +1046,7 @@ class Engine:
                 for k, v, cap in (
                     ("m5", pc["m5"], MAX_ENTRY_M5),
                     ("h1", pc["h1"], MAX_ENTRY_H1),
-                    ("h24", pc["h24"], MAX_ENTRY_H24),
+                    ("h24", pc["h24"], MAX_ENTRY_H24 if h24_capped(r) else 1e18),
                 )
                 if v > cap
             ]
@@ -1094,6 +1120,7 @@ class Engine:
                         "ranks": rec["ranks"],
                         "dex": rec["dex"],
                         "pcfix": bool(rec.get("pc_fixed")),
+                        "h24free": not h24_capped(rec, s),
                     },
                 }
             )
@@ -1664,6 +1691,8 @@ class Engine:
             for name in RANGES:
                 s.setdefault(name, LOOSE.get(name, RANGES[name][0]))
             s["stats"].setdefault("mints", {})
+            for b in BOOLS:
+                s.setdefault(b, False)
             repair(s)
         for tag, specs in INJECTED_SEEDS.items():
             if tag not in self.injected:
