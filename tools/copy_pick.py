@@ -8,6 +8,7 @@ on each coin, become candidates for step 2 (copy_wallets.py), which reads each
 wallet's own history on chain. Prints the candidates as JSON between markers.
 """
 import json
+import os
 import time
 import urllib.error
 import urllib.request
@@ -20,6 +21,7 @@ TOP_COINS = 15
 BANDS = (None, 300, 2000)  # trade_volume_in_usd_greater_than
 PER_COIN_TOP = 6
 MAX_WALLETS = 90
+SOURCE = os.environ.get("PICK_SOURCE", "trending")  # or "volume": top 24h volume pools
 
 
 def get(url):
@@ -40,8 +42,11 @@ def get(url):
 
 
 coins = []
-for page in (1, 2):
-    d = get(f"{GT}/trending_pools?page={page}&include=base_token")
+for page in ((1, 2) if SOURCE == "trending" else (1, 2, 3, 4, 5)):
+    if SOURCE == "volume":
+        d = get(f"{GT}/pools?page={page}&sort=h24_volume_usd_desc&include=base_token")
+    else:
+        d = get(f"{GT}/trending_pools?page={page}&include=base_token")
     if not d:
         continue
     for p in d["data"]:
@@ -62,7 +67,7 @@ for page in (1, 2):
     if len(coins) >= TOP_COINS:
         break
 coins = coins[:TOP_COINS]
-print(f"{len(coins)} trending meme coins (GeckoTerminal, {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime())}):")
+print(f"{len(coins)} {SOURCE} meme coins (GeckoTerminal, {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime())}):")
 for c in coins:
     print(f"  {c['sym'][:14]:14} {c['mint']} fdv ${c['fdv']:,.0f} vol24 ${c['vol24']:,.0f} pool since {c['created']} on {c['dex']}")
 
