@@ -23,10 +23,32 @@ MAX_TX = int(os.environ.get("MAX_TX", "5000"))
 DEADLINE_S = 105 * 60
 
 
+RECENT_S = 1.25 * 86400   # PublicNode keeps about this much, fast to read
+SLOW_BUDGET = int(os.environ.get("SLOW_BUDGET", "2400"))  # older tx read from mainnet-beta at ~1/s
+BLOCKS = 4
+
+
+def to_event(tx, s, wallet, solusd):
+    r = cw.parse_tx(tx, wallet, solusd)
+    if not r:
+        return None
+    sol, tok = r
+    t = tx.get("blockTime") or s.get("blockTime") or 0
+    if len(tok) != 1:
+        return None
+    (m, d), = tok.items()
+    if d > 0 and sol < -0.001:
+        return {"t": t, "mint": m, "side": "buy", "sol": -sol, "tok": d}
+    if d < 0 and sol > 0.0005:
+        return {"t": t, "mint": m, "side": "sell", "sol": sol, "tok": -d}
+    return {"t": t, "mint": m, "side": "in" if d > 0 else "out", "sol": 0, "tok": abs(d)}
+
+
 def history(wallet, solusd):
-    cutoff = time.time() - DAYS * 86400
+    now = time.time()
+    cutoff = now - DAYS * 86400
     sigs, before = [], None
-    while len(sigs) < MAX_TX:
+    for _ in range(100):
         p = {"limit": 1000}
         if before:
             p["before"] = before
@@ -37,31 +59,32 @@ def history(wallet, solusd):
         sigs += [s for s in page if not s.get("err") and (s.get("blockTime") or 0) >= cutoff]
         if len(page) < 1000 or (page[-1].get("blockTime") or 0) < cutoff:
             break
-    sigs = sigs[:MAX_TX]
     span = (sigs[0].get("blockTime", 0) - sigs[-1].get("blockTime", 0)) if sigs else 0
+    info = {"tx30": len(sigs), "days": round(span / 86400, 1)}
     if len(sigs) >= 200 and span < len(sigs) * 60:
-        return None, len(sigs), span
+        return None, info
+    recent = [s for s in sigs if s["blockTime"] >= now - RECENT_S]
+    older = [s for s in sigs if s["blockTime"] < now - RECENT_S]
+    if len(older) > SLOW_BUDGET:
+        size = SLOW_BUDGET // BLOCKS
+        step = len(older) // BLOCKS
+        older = [x for b in range(BLOCKS) for x in older[b * step + (step - size) // 2: b * step + (step - size) // 2 + size]]
+    picked = recent[:MAX_TX] + older
+    info["parsed"] = len(picked)
+    info["sampled"] = len(picked) < len(sigs)
     events = []
-    for s in sigs:
+    for s in picked:
         tx = cw.rpc("getTransaction", [s["signature"], {"maxSupportedTransactionVersion": 0, "encoding": "json"}])
-        if not tx:
-            continue
-        r = cw.parse_tx(tx, wallet, solusd)
-        if not r:
-            continue
-        sol, tok = r
-        t = tx.get("blockTime") or s.get("blockTime") or 0
-        if len(tok) == 1:
-            (m, d), = tok.items()
-            if d > 0 and sol < -0.001:
-                events.append({"t": t, "mint": m, "side": "buy", "sol": -sol, "tok": d})
-            elif d < 0 and sol > 0.0005:
-                events.append({"t": t, "mint": m, "side": "sell", "sol": sol, "tok": -d})
-            elif d > 0:
-                events.append({"t": t, "mint": m, "side": "in", "sol": 0, "tok": d})
-            else:
-                events.append({"t": t, "mint": m, "side": "out", "sol": 0, "tok": -d})
-    return sorted(events, key=lambda e: e["t"]), len(sigs), span
+        if tx:
+            e = to_event(tx, s, wallet, solusd)
+            if e:
+                events.append(e)
+    if info["sampled"]:
+        # a buy inside an older sampled block with no sell seen may have been sold in the gap: drop it
+        sold = {e["mint"] for e in events if e["side"] == "sell"}
+        old_open = {e["mint"] for e in events if e["side"] == "buy" and e["t"] < now - RECENT_S and e["mint"] not in sold}
+        events = [e for e in events if e["mint"] not in old_open]
+    return sorted(events, key=lambda e: e["t"]), info
 
 
 def weekly(coins):
@@ -84,13 +107,14 @@ def run(name):
             print("deadline: skipped " + " ".join(x["wallet"] for x in wallets[j:]))
             break
         t0 = time.time()
-        ev, ntx, span = history(w["wallet"], solusd)
-        print(f"  [{j + 1}/{len(wallets)}] {w['wallet']} {ntx} tx over {span / 86400:.1f} d, "
+        ev, info = history(w["wallet"], solusd)
+        print(f"  [{j + 1}/{len(wallets)}] {w['wallet']} {info} "
               f"{'bot-rate' if ev is None else str(len(ev)) + ' swaps/transfers'} ({time.time() - t0:.0f}s)")
         if ev is None:
-            print("SCORE " + json.dumps({"wallet": w["wallet"], "why": w.get("why"), "tx": ntx, "span_h": round(span / 3600, 1),
+            print("SCORE " + json.dumps({"wallet": w["wallet"], "why": w.get("why"), **info,
                                          "flags": ["bot"], "coins": 0, "pnl_sol": 0, "win_rate": 0}))
             continue
+        ntx, span = info["parsed"], info["days"] * 86400
         prices = cw.jup_prices({e["mint"] for e in ev})
         s, coins = cw.score(w["wallet"], ev, ntx, span, prices, solusd)
         s["why"] = w.get("why")
@@ -99,7 +123,7 @@ def run(name):
             s["flags"].append("few_coins")
         wk = list(s["weeks"].values())
         s["weeks_up"] = f"{sum(v > 0 for v in wk)}/{len(wk)}"
-        s["capped"] = ntx >= MAX_TX
+        s.update(info)
         ok = (not s["flags"] and s["win_rate"] >= 0.45 and s["pnl_sol"] > 0 and wk and sum(v > 0 for v in wk) * 2 >= len(wk))
         sim = None
         if ok:

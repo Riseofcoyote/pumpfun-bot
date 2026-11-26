@@ -18,7 +18,7 @@ from datetime import datetime
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from copy_wallets import rpc, jup_prices, sol_usd, WSOL, USD_MINTS  # noqa: E402
 
-MAX_PAGES = 400          # 400k signatures
+MAX_PAGES = 1500         # 1.5M signatures
 MAX_PARSE = 2500         # transactions parsed per coin, oldest first
 SNIPE_S = 60
 FALLBACK_WINDOW_S = 2 * 3600
@@ -70,7 +70,7 @@ def payer_trade(tx, mint, solusd):
     return None
 
 
-def main():
+def main(only=None):
     here = os.path.dirname(os.path.abspath(__file__))
     cand = json.load(open(os.path.join(here, "data", "copy_candidates.json")))
     solusd = sol_usd()
@@ -78,7 +78,9 @@ def main():
     info = jup_prices(mints)
     now = time.time()
     early = defaultdict(dict)  # wallet -> mint -> stats
-    for c in cand["coins"]:
+    for ci, c in enumerate(cand["coins"]):
+        if only is not None and ci not in only:
+            continue
         created = ts((info.get(c["mint"]) or {}).get("createdAt"))
         pool_t = ts(c.get("created"))
         if not created or now - created > 30 * 86400:
@@ -92,6 +94,9 @@ def main():
             print(f"{c['sym']}: over {MAX_PAGES}k signatures, cannot reach launch, skipped")
             continue
         start = sigs[0].get("blockTime") or created
+        if start - created > 600:
+            print(f"{c['sym']}: oldest signature is {(start - created) / 3600:.1f} h after launch, history incomplete, skipped")
+            continue
         end = pool_t if pool_t and pool_t - start > 600 else start + FALLBACK_WINDOW_S
         window = [s for s in sigs if start + SNIPE_S <= (s.get("blockTime") or 0) <= end][:MAX_PARSE]
         buys = 0
@@ -125,4 +130,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    main([int(x) for x in sys.argv[1:]] or None)

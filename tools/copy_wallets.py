@@ -69,11 +69,28 @@ def http(url, body=None, gap=0.0, tries=7):
     return None
 
 
+_last_mb = [0.0]
+
+
+def _mb(body):
+    """mainnet-beta: full history, about 1 call a second sustained (0.6 s gap, no 429s)."""
+    wait = 0.6 - (time.time() - _last_mb[0])
+    if wait > 0:
+        time.sleep(wait)
+    out = http(RPC_FALLBACK, body, 0.0, tries=6)
+    _last_mb[0] = time.time()
+    return out
+
+
 def rpc(method, params):
+    """Signatures come from mainnet-beta (PublicNode only keeps about 1.3 days).
+    Transactions try PublicNode first (fast, recent only), then mainnet-beta."""
     body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).encode()
-    out = http(RPC, body, RPC_GAP, tries=4)
-    if out is None or "error" in out:
-        out = http(RPC_FALLBACK, body, 0.3, tries=4)
+    if method == "getTransaction":
+        out = http(RPC, body, RPC_GAP, tries=3)
+        if out and out.get("result"):
+            return out["result"]
+    out = _mb(body)
     return (out or {}).get("result")
 
 
