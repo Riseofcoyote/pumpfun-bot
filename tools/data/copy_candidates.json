@@ -1,0 +1,756 @@
+{
+"at": 1795659801.1033077,
+"coins": [
+{
+"sym": "JIMMY",
+"mint": "38M2z4UCfZEkUHFzD48vhKQhFhNyRGto8pZbLjNipump",
+"pool": "FnHWfV49ywCtGCDTyf34AVN8BiXxcgXUKqLctkrkP1gQ",
+"fdv": 630761.440112285,
+"vol24": 2785389.66085779,
+"created": "2026-11-23T21:11:11Z",
+"dex": "pumpswap",
+"trades_seen": 601,
+"window": "2026-11-25T02:44:30Z .. 2026-11-26T02:14:20Z"
+},
+{
+"sym": "ANSEM",
+"mint": "9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump",
+"pool": "FnzKY6x7entQ1eR3D225dQyT7ybfka4PskBMQhb8L3CC",
+"fdv": 19354028.2268617,
+"vol24": 2390197.99852487,
+"created": "2026-06-16T21:05:48Z",
+"dex": "pumpswap",
+"trades_seen": 706,
+"window": "2026-11-25T02:28:40Z .. 2026-11-26T02:13:59Z"
+},
+{
+"sym": "BASKET",
+"mint": "3Tg6YnNrfPdFfsY14MaNsDMWLseAyrUDS3myJtbaJN6f",
+"pool": "CixcofsPwHnYWjsoDxXxvLd6uM5fH7w8MFPL9mpQpqtX",
+"fdv": 793061.5119,
+"vol24": 5308099.75050668,
+"created": "2026-11-25T04:43:02Z",
+"dex": "raydium",
+"trades_seen": 655,
+"window": "2026-11-25T04:43:30Z .. 2026-11-26T02:15:02Z"
+},
+{
+"sym": "4CHAN",
+"mint": "DVdWuNK8ncn79B6z8nCiwcNAiwyFcmBPfChgxJGTpump",
+"pool": "Ak4wr2ueEAJMqZSEcGPMX9EhCrwWRngP8CskvdEh1e6H",
+"fdv": 143695.9957,
+"vol24": 5332943.70609761,
+"created": "2026-11-24T22:00:52Z",
+"dex": "pumpswap",
+"trades_seen": 624,
+"window": "2026-11-25T03:19:43Z .. 2026-11-26T02:15:26Z"
+},
+{
+"sym": "Pompom",
+"mint": "5EmvWDizkpjAXbcfCcVq69w1id8GaLzi4LLwtuSgpump",
+"pool": "7kNYdYbHbGMdQczmKSxqNzg4p4pGc6VpERzMfPBptGso",
+"fdv": 117161.789816257,
+"vol24": 3691225.13963525,
+"created": "2026-11-25T11:16:45Z",
+"dex": "pumpswap",
+"trades_seen": 605,
+"window": "2026-11-25T12:20:39Z .. 2026-11-26T02:15:58Z"
+},
+{
+"sym": "FIONA",
+"mint": "B34nXKzCgsJb9ChLuSHPRpXLE3WFSWyeT8Cqkzzmpump",
+"pool": "DjbLtX1HRGZZrJgJ7CwTX6SN3D7tBLiytkGwomBUwTVB",
+"fdv": 1973189.76157281,
+"vol24": 1393990.48366017,
+"created": "2026-11-19T20:53:29Z",
+"dex": "pumpswap",
+"trades_seen": 590,
+"window": "2026-11-25T02:33:41Z .. 2026-11-26T02:17:14Z"
+},
+{
+"sym": "PERRO",
+"mint": "4Di56UJzpnb7E4D7aLXFf7aLF5TrpJYv9Q3mR398pump",
+"pool": "4s1epXdedd7TY1UtJ7frou3saSxuG98os7HcPtNEu8WH",
+"fdv": 35555.9319483695,
+"vol24": 1997841.28628566,
+"created": "2026-11-25T01:24:10Z",
+"dex": "pumpswap",
+"trades_seen": 601,
+"window": "2026-11-25T04:00:32Z .. 2026-11-26T02:17:20Z"
+},
+{
+"sym": "mihao",
+"mint": "4CxjZyMNoF1p6eXHXHv1TWpS2X47CuUmLwtGe18spump",
+"pool": "Ho1aSG6WGH1FfXdEHrK2f4Ggt1Hoxo9s5jcLMDqeyeBz",
+"fdv": 4214232.22707926,
+"vol24": 870334.725794388,
+"created": "2026-10-25T16:43:15Z",
+"dex": "pumpswap",
+"trades_seen": 585,
+"window": "2026-11-25T02:20:38Z .. 2026-11-26T02:17:26Z"
+},
+{
+"sym": "CATE",
+"mint": "Ai66LHZG9MCzg1WKdawwqduVAXpNDUuV8M3uyq5ppump",
+"pool": "HMzvsEEmtzHhvZNw9uwbaG85HCTmFnkbhzUx16cy7ca3",
+"fdv": 16761762.4276353,
+"vol24": 387613.275695028,
+"created": "2026-07-26T16:32:43Z",
+"dex": "pumpswap",
+"trades_seen": 547,
+"window": "2026-11-25T02:21:03Z .. 2026-11-26T02:17:18Z"
+},
+{
+"sym": "JaoJiu",
+"mint": "2UyrvgCRXiEwiKRVk96gs6B4myrBHZAfcLyMVLE8vSCy",
+"pool": "4f4F69asRNnyyCidkkmNG9EsFt1fGw2CWiNeqcRwAtN8",
+"fdv": 12991.18285,
+"vol24": 1723606.10563442,
+"created": "2026-11-25T07:15:38Z",
+"dex": "pumpswap",
+"trades_seen": 602,
+"window": "2026-11-25T08:56:32Z .. 2026-11-26T02:16:03Z"
+},
+{
+"sym": "pippin",
+"mint": "Dfh5DzRgSvvCFDoYc2ciTkMrbDfRKybA4SoFbPmApump",
+"pool": "8WwcNqdZjCY5Pt7AkhupAFknV2txca9sq6YBkGzLbvdt",
+"fdv": 18873875.2230789,
+"vol24": 1459123.88080279,
+"created": "2024-11-09T20:27:41Z",
+"dex": "raydium",
+"trades_seen": 582,
+"window": "2026-11-25T03:17:32Z .. 2026-11-26T02:19:07Z"
+},
+{
+"sym": "VINE",
+"mint": "6AJcP7wuLwmRYLBNbi825wgguaPsWzPBEHcHndpRpump",
+"pool": "58fzJMbX5PatnfJPqWWsqkVFPRKptkbb5r2vCw4Qq3z9",
+"fdv": 9332923.107286,
+"vol24": 1397826.68177042,
+"created": "2025-01-23T00:22:43Z",
+"dex": "raydium",
+"trades_seen": 615,
+"window": "2026-11-25T02:26:52Z .. 2026-11-26T02:19:49Z"
+},
+{
+"sym": "STONK",
+"mint": "6GmAFSYs4gk3FDao5FzzySQpPZaWsa4rUJHacpMpUNgx",
+"pool": "zxTpi4BtaWX3mgdAPoezkMD1hxx8CdeCfrqXMWvSCLX",
+"fdv": 24259650.5841309,
+"vol24": 1305226.7386802,
+"created": "2026-08-12T10:51:40Z",
+"dex": "meteora",
+"trades_seen": 617,
+"window": "2026-11-25T02:31:33Z .. 2026-11-26T02:20:46Z"
+},
+{
+"sym": "HONEY",
+"mint": "4vMsoUT2BWatFweudnQM1xedRLfJgJ7hswhcpz4xgBTy",
+"pool": "ENYEHSyduTbFN1xoSEGaLu7c1F8AqKucdscMuV5Yypy2",
+"fdv": 3774563.60795961,
+"vol24": 338515.764849568,
+"created": "2023-10-21T14:23:02Z",
+"dex": "orca",
+"trades_seen": 397,
+"window": "2026-11-25T06:48:29Z .. 2026-11-26T02:18:42Z"
+},
+{
+"sym": "WASTED",
+"mint": "GexThZHgaswpAQ7Fi8QrHFubjPimUNSYhJiAA7XZpump",
+"pool": "TT7DKs9YjJZj1fwMGoPmKBmDreZzyMAMrHoDCGdfwqN",
+"fdv": 874916.578247064,
+"vol24": 475125.889533478,
+"created": "2026-10-30T18:09:35Z",
+"dex": "pumpswap",
+"trades_seen": 533,
+"window": "2026-11-25T02:25:01Z .. 2026-11-26T02:22:31Z"
+}
+],
+"wallets": [
+{
+"wallet": "FHpcNSe6tb2n15bAdq4BkeYWGyZKFD7yLYrH92ng7wCT",
+"why": "top net JIMMY",
+"coins": 13,
+"vol_usd": 182364,
+"net_usd": 110393,
+"n": 306
+},
+{
+"wallet": "Af6trHXCza8KkVxijUBjA5k3rWi86BDGRyXouEKeBiVW",
+"why": "top net JIMMY",
+"coins": 1,
+"vol_usd": 7369,
+"net_usd": 7369,
+"n": 3
+},
+{
+"wallet": "MfyJcDhWskpuVrJspTxcodH5EWkie1tqjCgZ3gTaQo9",
+"why": "top net JIMMY",
+"coins": 1,
+"vol_usd": 4601,
+"net_usd": 4601,
+"n": 2
+},
+{
+"wallet": "AoGefnxF5CbZvbd2cvxv4Ex1E5j86dqEjehazRuMcMFe",
+"why": "top volume JIMMY",
+"coins": 1,
+"vol_usd": 13965,
+"net_usd": -1436,
+"n": 19
+},
+{
+"wallet": "AgmLJBMDCqWynYnQiPCuj9ewsNNsBJXyzoUhD9LJzN51",
+"why": "top volume JIMMY",
+"coins": 14,
+"vol_usd": 328479,
+"net_usd": 130004,
+"n": 625
+},
+{
+"wallet": "3Do5KpLHU8FEjbPjRXiUebZxK6eMDmhsVNoo4PSoHVym",
+"why": "top net ANSEM",
+"coins": 1,
+"vol_usd": 29249,
+"net_usd": 29249,
+"n": 4
+},
+{
+"wallet": "CyxbSF3f3kAz6JyeDFGsvxMmpDZbWHELMB6EPUdLd16",
+"why": "top net ANSEM",
+"coins": 2,
+"vol_usd": 32234,
+"net_usd": 15922,
+"n": 29
+},
+{
+"wallet": "FPFzoyxg5co9FsqxYB6ZQHYKa4Q32XMsk8xTXTffhMiU",
+"why": "top volume ANSEM",
+"coins": 1,
+"vol_usd": 74659,
+"net_usd": -74659,
+"n": 8
+},
+{
+"wallet": "QGLBhbhanJLznKtK1mEXfG74hTNpJpGiKSQjim6ScwP",
+"why": "top volume ANSEM",
+"coins": 1,
+"vol_usd": 46990,
+"net_usd": 3815,
+"n": 20
+},
+{
+"wallet": "CVc9rrNro6eEcUKY34HTYNN9zofFFD3JNQQZfGpguh6N",
+"why": "top net BASKET",
+"coins": 1,
+"vol_usd": 9409,
+"net_usd": 9409,
+"n": 3
+},
+{
+"wallet": "2EMVebBiMiZfyzB8REXnNZyvFiaSGpkq9zsrWftuiVVR",
+"why": "top net BASKET",
+"coins": 1,
+"vol_usd": 4773,
+"net_usd": 4773,
+"n": 2
+},
+{
+"wallet": "6gRWkuSvGbVJbkBs7pVDqQU8nK6dcSsskKmUuEtqvJ7m",
+"why": "top net 4CHAN",
+"coins": 1,
+"vol_usd": 6141,
+"net_usd": 6141,
+"n": 1
+},
+{
+"wallet": "hnu69n6P5CgYXCtUKii9wgamqtDeTVHY3TVJ6HKt7wC",
+"why": "top volume 4CHAN",
+"coins": 1,
+"vol_usd": 13650,
+"net_usd": 3627,
+"n": 5
+},
+{
+"wallet": "FM1YCKED2KaqB8Uat8aB1nsffR1vezr7s6FAEieXJgke",
+"why": "top net Pompom",
+"coins": 1,
+"vol_usd": 6178,
+"net_usd": 6178,
+"n": 2
+},
+{
+"wallet": "3gntdixKRwxfXmf15wG3nkqqppbsHTPS7n7c1QdDJ3bt",
+"why": "top net Pompom",
+"coins": 2,
+"vol_usd": 8007,
+"net_usd": 5889,
+"n": 12
+},
+{
+"wallet": "MriyaNN8TMp6qRWjfr723PK7xgQK7yCt7Kg2v2PQu7X",
+"why": "top volume Pompom",
+"coins": 10,
+"vol_usd": 64922,
+"net_usd": -36949,
+"n": 85
+},
+{
+"wallet": "87rRdssFiTJKY4MGARa4G5vQ31hmR7MxSmhzeaJ5AAxJ",
+"why": "top net FIONA",
+"coins": 1,
+"vol_usd": 14816,
+"net_usd": 14816,
+"n": 6
+},
+{
+"wallet": "DYmsQudNqJyyDvq86XmzAvrU9T7xwfQEwh6gPQw9TPNF",
+"why": "top net FIONA",
+"coins": 1,
+"vol_usd": 8500,
+"net_usd": 8500,
+"n": 7
+},
+{
+"wallet": "DRvJEnxTmEVCaSjSDxBeEtybqUvCtZGvcXhUzM1AwRS8",
+"why": "top volume FIONA",
+"coins": 1,
+"vol_usd": 21125,
+"net_usd": -21125,
+"n": 12
+},
+{
+"wallet": "64fcNUtAAockLpMJZ1DudHCMHJhLRBmgrmGvbrwmQzQw",
+"why": "top net PERRO",
+"coins": 7,
+"vol_usd": 11087,
+"net_usd": 11087,
+"n": 20
+},
+{
+"wallet": "ssssssA47RhvLY4jkMQFZBTjiSoL5gUr4b8QbnB5thY",
+"why": "top volume PERRO",
+"coins": 4,
+"vol_usd": 22020,
+"net_usd": 1688,
+"n": 57
+},
+{
+"wallet": "BCruhM8VzaDhsA1EM6ivpoWE1izoE8KqzVYzfZ618Nyv",
+"why": "top net mihao",
+"coins": 1,
+"vol_usd": 13600,
+"net_usd": 13600,
+"n": 8
+},
+{
+"wallet": "21Dy4X3YFDqn1HGAmM1un19E2FFyb8GMRqSiANSLrEY1",
+"why": "top net mihao",
+"coins": 1,
+"vol_usd": 5737,
+"net_usd": 5737,
+"n": 5
+},
+{
+"wallet": "7wExmWD8S7PCHFaKQSfemQnXngL1FwXGjCxn5bDj8Awu",
+"why": "top volume mihao",
+"coins": 1,
+"vol_usd": 18700,
+"net_usd": 261,
+"n": 18
+},
+{
+"wallet": "3UrEvSsjEnTRxFrM665CzL3wniA4oVEVo7S1ugbAYe8T",
+"why": "top net CATE",
+"coins": 2,
+"vol_usd": 9908,
+"net_usd": 7110,
+"n": 11
+},
+{
+"wallet": "5w4XrZrd3RSB37W5S7ykEr7EHYrqJRDdtajiyaJc6TuZ",
+"why": "top net CATE",
+"coins": 1,
+"vol_usd": 8456,
+"net_usd": 8456,
+"n": 1
+},
+{
+"wallet": "ESVPiw89EPDawTyqXWmot6nJ8D92MMNHH5fmDmficY32",
+"why": "top net CATE",
+"coins": 1,
+"vol_usd": 6856,
+"net_usd": 6856,
+"n": 1
+},
+{
+"wallet": "HcwiUbJNEtqqVKKJKMhPNQPezX9GRA9RB1V9KGi1BhAk",
+"why": "top volume CATE",
+"coins": 1,
+"vol_usd": 29520,
+"net_usd": -29520,
+"n": 10
+},
+{
+"wallet": "uyEsESVmqtzJfbYLvpmSpVqXhHhkW7uFWsgVSaY5DGd",
+"why": "top volume CATE",
+"coins": 2,
+"vol_usd": 30493,
+"net_usd": 14976,
+"n": 21
+},
+{
+"wallet": "HMSwHxC3Qnq1PN5pFxBK4taemi8NQPvN3ZPxuCRTgFsE",
+"why": "top net JaoJiu",
+"coins": 1,
+"vol_usd": 2674,
+"net_usd": 2674,
+"n": 1
+},
+{
+"wallet": "FRT8YuLJ9q8PPX2o4RUiJ9hWL427hNmMJ2M6JdgGgzwK",
+"why": "top volume JaoJiu",
+"coins": 1,
+"vol_usd": 6916,
+"net_usd": 1114,
+"n": 4
+},
+{
+"wallet": "MfDuWeqSHEqTFVYZ7LoexgAK9dxk7cy4DFJWjWMGVWa",
+"why": "top net pippin",
+"coins": 1,
+"vol_usd": 119940,
+"net_usd": 22604,
+"n": 254
+},
+{
+"wallet": "5tra33amvzXwnnzgwtaYEofWJifwyRc5WcVGxKqtNkiy",
+"why": "top net pippin",
+"coins": 1,
+"vol_usd": 3507,
+"net_usd": 3507,
+"n": 1
+},
+{
+"wallet": "5g1mPDQMYUc7ic4DwaSGHkvgdykbFZsjiswR8eKfdn8E",
+"why": "top net pippin",
+"coins": 1,
+"vol_usd": 27263,
+"net_usd": 3046,
+"n": 58
+},
+{
+"wallet": "FkaLnX17cXZGyeu3kZGdHCNdFMJJzBrPPYVvd18B3MZp",
+"why": "top volume pippin",
+"coins": 2,
+"vol_usd": 104794,
+"net_usd": -36066,
+"n": 145
+},
+{
+"wallet": "7rqskAg1eYcHXwL4FFdmgNuJ6rg4jCDfE29ugeeTrKez",
+"why": "top net VINE",
+"coins": 2,
+"vol_usd": 12139,
+"net_usd": 10251,
+"n": 6
+},
+{
+"wallet": "gasTzr94Pmp4Gf8vknQnqxeYxdgwFjbgdJa4msYRpnB",
+"why": "top net VINE",
+"coins": 3,
+"vol_usd": 9674,
+"net_usd": 8386,
+"n": 4
+},
+{
+"wallet": "HYe4vSaEGqQKnDrxWDrk3o5H2gznv7qtij5G6NNG8WHd",
+"why": "top volume VINE",
+"coins": 3,
+"vol_usd": 90377,
+"net_usd": -37175,
+"n": 317
+},
+{
+"wallet": "FG8LEP14GKw6ADNcqNHhVLNLuyMiJJFjzLrbiUEVQ75j",
+"why": "top volume VINE",
+"coins": 2,
+"vol_usd": 26191,
+"net_usd": 1240,
+"n": 8
+},
+{
+"wallet": "8nufC2qTR4D3Z7qRMb6819XHYhFcvLiGxvAaenHByLr6",
+"why": "top net STONK",
+"coins": 1,
+"vol_usd": 42198,
+"net_usd": 42198,
+"n": 2
+},
+{
+"wallet": "5ar2R7KW22Nq5cY7ZvQwYYtoTYS7Z8fhj7XA2Hsuyx5",
+"why": "top net STONK",
+"coins": 1,
+"vol_usd": 29107,
+"net_usd": 29107,
+"n": 1
+},
+{
+"wallet": "ENxbGG25uEj8KXKsYDjEKX7RWheb3QSBkcuGmSGL6b7h",
+"why": "top volume STONK",
+"coins": 1,
+"vol_usd": 88247,
+"net_usd": -4135,
+"n": 2
+},
+{
+"wallet": "39dsQc1fxkW3weHD6vUsomxjT8YfVPEuznrzpcpV29iq",
+"why": "top net HONEY",
+"coins": 1,
+"vol_usd": 8572,
+"net_usd": 8572,
+"n": 18
+},
+{
+"wallet": "BkbtvEGSyCqChwzwA9KJFWdLd4RwW9Ps78WUgpQ1Qrun",
+"why": "top net HONEY",
+"coins": 6,
+"vol_usd": 15228,
+"net_usd": 2310,
+"n": 22
+},
+{
+"wallet": "D4KULoD4xxHJaea3yrx2mf5avkSEJVm25KqFW3XUpUkW",
+"why": "top volume HONEY",
+"coins": 2,
+"vol_usd": 7780,
+"net_usd": -7780,
+"n": 14
+},
+{
+"wallet": "prUWZMpQAbRzmqnRqcoSh8jqcJ1M1g64uxsR7mq9bmv",
+"why": "top volume HONEY",
+"coins": 3,
+"vol_usd": 16892,
+"net_usd": -7324,
+"n": 18
+},
+{
+"wallet": "27xB5gydCM7LPcDuJA6oNShGTVSAeNjmi5r95uB5z2cK",
+"why": "top net WASTED",
+"coins": 1,
+"vol_usd": 4674,
+"net_usd": 4674,
+"n": 3
+},
+{
+"wallet": "J5m97mZJN82bYVhWh7wE6TahR7HPVcMueHunhxhgsrmi",
+"why": "top net WASTED",
+"coins": 1,
+"vol_usd": 3655,
+"net_usd": 3655,
+"n": 6
+},
+{
+"wallet": "CarCJspx7wdmdKQ79U5KgVPrBsqQjBsoD5eSmeRog1xK",
+"why": "top net WASTED",
+"coins": 1,
+"vol_usd": 9823,
+"net_usd": 3356,
+"n": 4
+},
+{
+"wallet": "9omRg1hQumLkGRcRhcTaKcr2pBakvHuGoeWauqngiWHU",
+"why": "top volume WASTED",
+"coins": 2,
+"vol_usd": 15655,
+"net_usd": -6086,
+"n": 13
+},
+{
+"wallet": "HiMomvku1FajUW4mc33wudNg6vjaSVEwZhcv7DXGJmjH",
+"why": "12 trending coins",
+"coins": 12,
+"vol_usd": 16751,
+"net_usd": 633,
+"n": 45
+},
+{
+"wallet": "GGEZ2xUH1LYH4WUgXNWoxTeUdeJt7iPRB5hdj9t4aDAY",
+"why": "12 trending coins",
+"coins": 12,
+"vol_usd": 932,
+"net_usd": 462,
+"n": 41
+},
+{
+"wallet": "Jd97uyw9wb6PxV2jawAjS7aU6XUMHbcfn4En8xRP7Mg",
+"why": "11 trending coins",
+"coins": 11,
+"vol_usd": 4538,
+"net_usd": -2180,
+"n": 21
+},
+{
+"wallet": "7iVCXQn4u6tiTEfNVqbWSEsRdEi69E9oYsSMiepuECwi",
+"why": "9 trending coins",
+"coins": 9,
+"vol_usd": 16330,
+"net_usd": -16318,
+"n": 17
+},
+{
+"wallet": "7JCe3GHwkEr3feHgtLXnmuJ1yB3A7coSeyynxTBgdG8k",
+"why": "8 trending coins",
+"coins": 8,
+"vol_usd": 9712,
+"net_usd": -4029,
+"n": 14
+},
+{
+"wallet": "GxDC9e7SP9mzhDo4re5HbpLa2RW7gB9DtmThx4i4pXSq",
+"why": "8 trending coins",
+"coins": 8,
+"vol_usd": 5787,
+"net_usd": -86,
+"n": 22
+},
+{
+"wallet": "F7p3dFrjRTbtRp8FRF6qHLomXbKRBzpvBLjtQcfcgmNe",
+"why": "7 trending coins",
+"coins": 7,
+"vol_usd": 9427,
+"net_usd": -9427,
+"n": 12
+},
+{
+"wallet": "HAWK3BVnwptKRFYfVoVGhBc2TYxpyG9jmAbkHeW9tyKE",
+"why": "7 trending coins",
+"coins": 7,
+"vol_usd": 3770,
+"net_usd": 2677,
+"n": 20
+},
+{
+"wallet": "5dCnoS4muwRs7zugBwfBsgQFk8yTjYBdDWq1WZtmsvcm",
+"why": "7 trending coins",
+"coins": 7,
+"vol_usd": 1563,
+"net_usd": -335,
+"n": 14
+},
+{
+"wallet": "Em8J3gBWapfVBGVhVipwQnLrqCvnWBnLajw6XFsFECPF",
+"why": "6 trending coins",
+"coins": 6,
+"vol_usd": 20599,
+"net_usd": -19331,
+"n": 10
+},
+{
+"wallet": "2vuXLV8sFrMXtmrpLUQtBaTBAiyLyEKoBpu4u7kvCmpN",
+"why": "6 trending coins",
+"coins": 6,
+"vol_usd": 4622,
+"net_usd": 401,
+"n": 16
+},
+{
+"wallet": "2yDEStr5muT5f11k8PUZTgbpMt77LQ8CVf4DEzSNA4ia",
+"why": "5 trending coins",
+"coins": 5,
+"vol_usd": 10559,
+"net_usd": -3354,
+"n": 28
+},
+{
+"wallet": "8zkgFGVZrDLieViwqiXFCydSX6WL5hsxmUu55yBdsNsZ",
+"why": "5 trending coins",
+"coins": 5,
+"vol_usd": 8174,
+"net_usd": 445,
+"n": 17
+},
+{
+"wallet": "72tAZjqymv4J2KHDPd3rzFkPL78tj556K32BJgBmBu5D",
+"why": "5 trending coins",
+"coins": 5,
+"vol_usd": 6008,
+"net_usd": 625,
+"n": 18
+},
+{
+"wallet": "5Evb9RZjVL8gRHshFbAgLnXcpv8PWiZG7CoXzzKkcXcz",
+"why": "5 trending coins",
+"coins": 5,
+"vol_usd": 5127,
+"net_usd": 820,
+"n": 12
+},
+{
+"wallet": "4h4ZbAPF62fJ4CWJhg1AsrKtTz6zbKeHWhqP9TtggBou",
+"why": "5 trending coins",
+"coins": 5,
+"vol_usd": 4864,
+"net_usd": -2694,
+"n": 12
+},
+{
+"wallet": "G3wduAjRKB1dnjGCEEqwNtRKodeKJ4VBDbbiG5HfLLMB",
+"why": "5 trending coins",
+"coins": 5,
+"vol_usd": 3748,
+"net_usd": -2579,
+"n": 7
+},
+{
+"wallet": "4BQ6ATUt26GFdiYQfht23iwfKyYD9D7XbL5ATqNGk3xK",
+"why": "5 trending coins",
+"coins": 5,
+"vol_usd": 3684,
+"net_usd": -1766,
+"n": 8
+},
+{
+"wallet": "9fcMp3GNGnd3qTn4krE399UYEsUNfkVsXQvo8np47NGW",
+"why": "5 trending coins",
+"coins": 5,
+"vol_usd": 3559,
+"net_usd": 545,
+"n": 8
+},
+{
+"wallet": "DtvmxrTACskMG2W8a6KXgSemUfvyNVeQTgfpJoGvMVKx",
+"why": "5 trending coins",
+"coins": 5,
+"vol_usd": 2676,
+"net_usd": -19,
+"n": 7
+},
+{
+"wallet": "CA59n4oZNMEdzRPJWjjVEN5SL2kvhkasRMP73SNYh6x4",
+"why": "5 trending coins",
+"coins": 5,
+"vol_usd": 2162,
+"net_usd": -1536,
+"n": 13
+},
+{
+"wallet": "ALVMJ9bny8tFT7AapoVbbzrgCYzrjy8iHw6EHFaehgZZ",
+"why": "5 trending coins",
+"coins": 5,
+"vol_usd": 2155,
+"net_usd": 2155,
+"n": 5
+},
+{
+"wallet": "FsBGaxR5CpHCgTq8RdzPYz7DF3oZLJWSkRZNnsBDhzn6",
+"why": "5 trending coins",
+"coins": 5,
+"vol_usd": 1068,
+"net_usd": -1068,
+"n": 27
+}
+]
+}
