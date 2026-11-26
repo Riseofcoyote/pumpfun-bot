@@ -341,10 +341,10 @@ def report(s, sim=None):
     print("SCORE " + json.dumps(s))
 
 
-def main(shard, nshards):
+def main(shard, nshards, cand_file="copy_candidates.json"):
     start = time.time()
     here = os.path.dirname(os.path.abspath(__file__))
-    cand = json.load(open(os.path.join(here, "data", "copy_candidates.json")))
+    cand = json.load(open(os.path.join(here, "data", cand_file)))
     wallets = [w for i, w in enumerate(cand["wallets"]) if i % nshards == shard]
     trending = {c["mint"]: c["sym"] for c in cand["coins"]}
     solusd = sol_usd()
