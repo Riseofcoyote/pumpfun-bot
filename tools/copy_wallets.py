@@ -35,7 +35,8 @@ import urllib.request
 from collections import defaultdict
 from datetime import datetime, timezone
 
-RPC = "https://api.mainnet-beta.solana.com"
+RPC = os.environ.get("RPC_URL", "https://solana-rpc.publicnode.com")  # ~15 tx/s free; mainnet-beta is ~0.3 tx/s
+RPC_FALLBACK = "https://api.mainnet-beta.solana.com"
 GT = "https://api.geckoterminal.com/api/v2/networks/solana"
 WSOL = "So11111111111111111111111111111111111111112"
 USD_MINTS = {"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"}
@@ -45,7 +46,7 @@ STAKE = 0.2
 FIXED_SOL = 0.0008
 SLIP = 0.01
 DEX_FEE = {"pumpfun": 0.0125, "pumpswap": 0.0125, "raydium": 0.0025}
-RPC_GAP = 0.26
+RPC_GAP = float(os.environ.get("RPC_GAP", "0.06"))
 
 
 def http(url, body=None, gap=0.0, tries=7):
@@ -69,7 +70,10 @@ def http(url, body=None, gap=0.0, tries=7):
 
 
 def rpc(method, params):
-    out = http(RPC, json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).encode(), RPC_GAP)
+    body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).encode()
+    out = http(RPC, body, RPC_GAP, tries=4)
+    if out is None or "error" in out:
+        out = http(RPC_FALLBACK, body, 0.3, tries=4)
     return (out or {}).get("result")
 
 
