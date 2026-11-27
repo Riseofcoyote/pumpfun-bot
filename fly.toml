@@ -3,6 +3,10 @@
 # machine whenever no web traffic arrives.
 app = "pumpfun-bot-w1afdq"
 primary_region = "ewr"
+# Five testers leave about 100 MB free; an ssh session from a report workflow
+# then gets one of them killed (machine exit_code=1, no traceback, all restart).
+# Swap on the root disk absorbs the spike at no cost.
+swap_size_mb = 512
 
 [build]
 

@@ -19,8 +19,10 @@ SEARCH_FAMILIES = ("momentum", "dip", "surge", "volume_leader")
 SOURCES = ("any", "trend5m", "trend1h", "volume", "pumpvol", "grad")
 # Pools younger than this are fresh launches, not the established trending and
 # top-volume tokens this engine is for; no strategy may buy them. Returns in
-# 6-12 h pools fall steadily with age (6-8 h best), so 4-6 h is open to test.
-MIN_POOL_AGE_H = 4.0
+# 4-12 h pools fell steadily with age (4-7 h best), and by Nov 27 every 4-12 h
+# pool over the liquidity floor was a serial relaunch, so nothing could open.
+# 2-4 h is open to test; split those entries out by ctx.age_h before trusting them.
+MIN_POOL_AGE_H = 2.0
 # Through Nov 12 every pool-age band over 12 h lost after costs in every family
 # and in both halves (about 1,500 trades, 560 distinct entries, 75 tickers),
 # while 6-12 h pools made money. No strategy may buy a pool older than this.

@@ -824,6 +824,11 @@ SEEDS_V10 = [s | {"young_h24_free": True} for s in SEEDS_V9] + [
     for sl in (0.45, 0.20)
 ]
 
+# v11: with every 4-12 h pool over the floor blocked as a relaunch, nothing opened
+# for a week. These copy the v10 genomes onto 2-6 h graduates, the youngest band
+# the age floor allows; the rest of the population keeps its own age range.
+SEEDS_V11 = [s | {"min_age_h": 2, "max_age_h": 6} for s in SEEDS_V10]
+
 # Seed sets added to a running population once each, in this order.
 INJECTED_SEEDS = {
     "v3": SEEDS_V3,
@@ -834,6 +839,7 @@ INJECTED_SEEDS = {
     "v8": SEEDS_V8,
     "v9": SEEDS_V9,
     "v10": SEEDS_V10,
+    "v11": SEEDS_V11,
 }
 
 SEEDS = [
