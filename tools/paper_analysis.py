@@ -12,6 +12,8 @@ import sys
 from collections import defaultdict
 from datetime import datetime
 
+LIQ_FLOOR_USD = 150_000  # trending engine MIN_LIQ_USD
+
 
 def stats(rets: list[float]) -> str:
     """One line: n, mean, median, profit factor, win rate, halves, mean without top 3."""
@@ -77,6 +79,7 @@ def trending_part(rows: list[dict], label: str) -> None:
     print(f" {trades[0]['time_utc']} .. {trades[-1]['time_utc']}")
     rets = [r["_ret"] for r in trades]
     print("  all", stats(rets))
+    events(trades)
     big = sorted(trades, key=lambda r: -abs(r["_ret"]))[:8]
     print("-- largest |net| trades (outlier check)")
     for r in big:
@@ -133,9 +136,7 @@ def trending_part(rows: list[dict], label: str) -> None:
     for k, v in worst:
         print(f"  {k[:28]:28} {stats(v)}")
     ctx_tables(by)
-    young = [
-        r for r in trades if 4 <= (_ctx(r).get("age_h") or -1) <= 12
-    ]
+    young = [r for r in trades if 2 <= (_ctx(r).get("age_h") or -1) <= 12]
     if young:
         yb = defaultdict(lambda: defaultdict(list))
         for r in young:
@@ -146,7 +147,7 @@ def trending_part(rows: list[dict], label: str) -> None:
             for k, v in _ctx(r).items():
                 if isinstance(v, (int, float)) and not isinstance(v, bool):
                     yb[f"ctx.{k}"][v].append(r["_ret"])
-        print(f"\n=== YOUNG POOLS (ctx.age_h 4-12) {len(young)} trades")
+        print(f"\n=== YOUNG POOLS (ctx.age_h 2-12) {len(young)} trades")
         print("  all", stats([r["_ret"] for r in young]))
         print(f"  distinct symbols {len(yb['symbol'])}")
         table("young by family", yb["family"])
@@ -154,6 +155,43 @@ def trending_part(rows: list[dict], label: str) -> None:
         table("young by day", yb["day"], 1, 20)
         table("young by symbol (n>=5)", yb["symbol"], 5, 15)
         ctx_tables(yb)
+
+
+def events(trades: list[dict]) -> None:
+    """Stats per entry event: every strategy that bought one mint at one price.
+
+    Cloned genomes enter the same pool on the same tick, so trade counts
+    overstate how many independent bets were made; one event is one bet.
+    """
+    ev: dict = {}
+    for r in trades:
+        ev.setdefault((r["mint"], r["entry"]), []).append(r)
+    rows = sorted(ev.values(), key=lambda v: v[0]["_t"])
+    rets = [st.mean(x["_ret"] for x in v) for v in rows]
+    print(
+        f"-- entry events (clones merged): {len(rows)} events, "
+        f"{len({v[0]['mint'] for v in rows})} tokens"
+    )
+    print("  all", stats(rets))
+    bands = defaultdict(list)
+    for v, ret in zip(rows, rets, strict=True):
+        c = _ctx(v[0])
+        age, liq = c.get("age_h"), c.get("liq") or 0
+        if not isinstance(age, (int, float)):
+            continue
+        band = next(
+            b
+            for lo, b in (
+                (48, "48h+"),
+                (12, "12-48h"),
+                (4, "4-12h"),
+                (2, "2-4h"),
+                (-1, "<2h"),
+            )
+            if age >= lo
+        )
+        bands[f"{band} liq{'>=' if liq >= LIQ_FLOOR_USD else '<'}150k"].append(ret)
+    table("events by pool age and liquidity", bands)
 
 
 def _ctx(r: dict) -> dict:
@@ -308,8 +346,11 @@ def late_by_entry(rows: list[dict], clean) -> None:  # noqa: ANN001
     band compares signal and control launches in the same state at entry.
     """
     print("\n-- late entries by value multiple at entry (kind: stats)")
-    for rule, col in (("d5_trail", "mult_m5"), ("d5_hold", "mult_m5"),
-                      ("d15_trail", "mult_m15")):
+    for rule, col in (
+        ("d5_trail", "mult_m5"),
+        ("d5_hold", "mult_m5"),
+        ("d15_trail", "mult_m15"),
+    ):
         for lo, hi in LATE_BANDS:
             groups = defaultdict(list)
             for r in rows:
