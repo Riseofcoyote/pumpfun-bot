@@ -6,7 +6,9 @@
 name: Trending snapshots
 on:
   schedule:
-    - cron: "23 */3 * * *"
+    # GitHub skipped most 3-hourly runs (3 of ~11 ran Nov 26-27), so ask hourly;
+    # extra snapshots are harmless and give more chances to land.
+    - cron: "37 * * * *"
   workflow_dispatch:
 permissions:
   contents: read
