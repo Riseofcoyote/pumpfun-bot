@@ -289,12 +289,41 @@ def devwatch(path: str) -> None:
                 h = len(vals) // 2
                 parts.append(f"{k} {st.mean(vals[:h]):+.1%}/{st.mean(vals[h:]):+.1%}")
         print(f"  {rule:10} " + "; ".join(parts))
+    late_by_entry(rows, clean)
     days = defaultdict(lambda: defaultdict(int))
     for r in rows:
         days[r["time_utc"][:10]][r["kind"]] += 1
     print("\n-- results per day by kind")
     for d in sorted(days)[-10:]:
         print(f"  {d} {dict(days[d])}")
+
+
+LATE_BANDS = ((0.6, 0.9), (0.9, 1.2), (1.2, 2.0), (2.0, 4.0), (4.0, 1e9))
+
+
+def late_by_entry(rows: list[dict], clean) -> None:  # noqa: ANN001
+    """Late-entry rules split by the launch's value multiple when the entry fills.
+
+    A d5 rule enters at roughly ``mult_m5`` and a d15 rule at ``mult_m15``, so a
+    band compares signal and control launches in the same state at entry.
+    """
+    print("\n-- late entries by value multiple at entry (kind: stats)")
+    for rule, col in (("d5_trail", "mult_m5"), ("d5_hold", "mult_m5"),
+                      ("d15_trail", "mult_m15")):
+        for lo, hi in LATE_BANDS:
+            groups = defaultdict(list)
+            for r in rows:
+                v = r.get(f"{rule}_net")
+                if not clean(r) or v in ("", None) or r.get(f"{rule}_why") == "skip":
+                    continue
+                try:
+                    m, net = float(r.get(col) or "x"), float(v)
+                except ValueError:
+                    continue
+                if lo <= m < hi:
+                    groups[r["kind"]].append(net)
+            hi_s = "+" if hi > 1e8 else f"{hi:g}"
+            table(f"{rule} entry x{lo:g}..{hi_s}", groups, 10, 6)
 
 
 if __name__ == "__main__":
