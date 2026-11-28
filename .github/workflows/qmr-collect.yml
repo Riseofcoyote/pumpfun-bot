@@ -1,0 +1,62 @@
+# Feeds quant-memcoins-researcher (tools/qmr_collect.py) live Solana meme data until
+# Dec 3, keeping its database in the Actions cache, so its strategy zoo can be run on
+# several days of history instead of one hour. Run the zoo with mode=zoo.
+# Read-only: public market data only, no secrets, no wallet, no trading.
+# Stops collecting by itself after STOP_AFTER; delete this file to stop sooner.
+name: QMR collect
+on:
+  schedule:
+    - cron: "12 * * * *"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: collect or zoo
+        default: collect
+permissions:
+  contents: read
+concurrency:
+  group: qmr-db
+  cancel-in-progress: false
+env:
+  STOP_AFTER: "2026-12-03T06:00:00Z"
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Gate
+        id: gate
+        run: |
+          MODE="${{ github.event.inputs.mode || 'collect' }}"
+          echo "mode=$MODE" >> "$GITHUB_OUTPUT"
+          if [ "$MODE" = collect ] && [ "$(date -u +%s)" -gt "$(date -u -d "$STOP_AFTER" +%s)" ]; then echo "run=no" >> "$GITHUB_OUTPUT"; echo "past $STOP_AFTER"; else echo "run=yes" >> "$GITHUB_OUTPUT"; fi
+      - uses: actions/checkout@v4
+        if: steps.gate.outputs.run == 'yes'
+      - uses: actions/setup-python@v5
+        if: steps.gate.outputs.run == 'yes'
+        with:
+          python-version: "3.11"
+      - uses: actions/cache/restore@v4
+        if: steps.gate.outputs.run == 'yes'
+        with:
+          path: qmr.db
+          key: qmr-db-${{ github.run_id }}
+          restore-keys: qmr-db-
+      - name: Run
+        if: steps.gate.outputs.run == 'yes'
+        env:
+          MODE: ${{ steps.gate.outputs.mode }}
+        run: python -u tools/qmr_collect.py
+      - uses: actions/cache/save@v4
+        if: always() && steps.gate.outputs.run == 'yes' && steps.gate.outputs.mode == 'collect'
+        with:
+          path: qmr.db
+          key: qmr-db-${{ github.run_id }}
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.gate.outputs.run == 'yes' && steps.gate.outputs.mode == 'zoo'
+        with:
+          name: qmr-zoo-${{ github.run_id }}
+          path: |
+            zoo_report.md
+            zoo_verdicts.json
+          retention-days: 30
